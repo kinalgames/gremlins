@@ -185,11 +185,19 @@ func (mu *Engine) mutationStatus(pos token.Position) mutator.Status {
 		status = mutator.Runnable
 	}
 
-	if !mu.codeData.Diff.IsChanged(pos) {
+	if !mu.codeData.Diff.IsChanged(mu.fromModuleRoot(pos)) {
 		status = mutator.Skipped
 	}
 
 	return status
+}
+
+// fromModuleRoot names pos's file from the module root, as the diff does: the engine reads the
+// files of the directory it was started for by their names in that directory.
+func (mu *Engine) fromModuleRoot(pos token.Position) token.Position {
+	pos.Filename = filepath.ToSlash(filepath.Join(mu.module.CallingDir, pos.Filename))
+
+	return pos
 }
 
 func (mu *Engine) executeTests(ctx context.Context) report.Results {

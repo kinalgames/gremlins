@@ -649,6 +649,39 @@ func TestSkipNotDiffMutants(t *testing.T) {
 	}
 }
 
+// TestDiffNamesTheFilesFromTheModuleRoot: run on a package below the module root, the engine reads
+// its files by their names in the package's directory, while the diff names them from the module
+// root; a mutant on a changed line of the package's file is not skipped.
+func TestDiffNamesTheFilesFromTheModuleRoot(t *testing.T) {
+	f, _ := os.Open("testdata/fixtures/geq_go")
+	file, _ := io.ReadAll(f)
+	sys := fstest.MapFS{"file.go": {Data: file}}
+	mod := gomodule.GoModule{Name: "example.com", Root: ".", CallingDir: "pkg"}
+	viperSet(map[string]any{configuration.UnleashDryRunKey: true})
+	defer viperReset()
+	testCases := []struct {
+		name    string
+		diff    diff.Diff
+		skipped bool
+	}{
+		{"the changed line, named from the module root", diff.Diff{"pkg/file.go": {{StartLine: 6, EndLine: 6}}}, false},
+		{"the changed line, named from the package's directory", diff.Diff{"file.go": {{StartLine: 6, EndLine: 6}}}, true},
+		{"other lines of the file", diff.Diff{"pkg/file.go": {{StartLine: 4, EndLine: 5}}}, true},
+	}
+	for _, tc := range testCases {
+		mut := engine.New(mod, engine.CodeData{Diff: tc.diff}, newJobDealerStub(t), engine.WithDirFs(sys))
+		res := mut.Run(context.Background())
+		if len(res.Mutants) == 0 {
+			t.Fatalf("%s: no mutants", tc.name)
+		}
+		for _, mutant := range res.Mutants {
+			if got := mutant.Status() == mutator.Skipped; got != tc.skipped {
+				t.Errorf("%s: %s at %s skipped %v, want %v", tc.name, mutant.Type(), mutant.Position(), got, tc.skipped)
+			}
+		}
+	}
+}
+
 func TestStopsOnCancel(t *testing.T) {
 	mapFS, mod, c := loadFixture(defaultFixture, ".")
 	defer c()
