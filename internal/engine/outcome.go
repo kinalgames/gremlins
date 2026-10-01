@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/go-gremlins/gremlins/internal/mutator"
@@ -32,10 +34,10 @@ type outcome int
 const (
 	passed   outcome = iota // every test it ran passed
 	failed                  // a test failed on the mutant: a panic inside a test is one
-	unbuilt                 // the mutated code does not build
-	timedOut                // the run passed its time, or the test binary its -timeout
-	crashed                 // the package failed with no test failing: a signal, a panic outside a test, TestMain's exit
-	broken                  // the run could not be carried out: the go command did not start, or refused its flags
+	unbuilt                 // the compiler refused the mutated line
+	timedOut                // the run passed its time
+	crashed                 // the package's tests failed with no test failing: a signal, a panic outside a test, TestMain's exit
+	broken                  // no verdict: the go command did not start, refused its flags, or failed before the package's tests ran
 )
 
 // statuses are the verdicts of the outcomes. A time-out counts as killed; a crash reaches no
@@ -61,19 +63,26 @@ func (o outcome) again() bool {
 	return o == timedOut || o == crashed
 }
 
+// repeats reports whether a run alone that ended alone repeats a first run's time-out or crash,
+// which then counts once the unmutated code passes in the same place (aloneStatus).
+func repeats(first, alone outcome) bool {
+	return alone == first && alone.again()
+}
+
 // aloneStatus is the verdict of a mutant whose run ended first and whose run alone, with every test
 // of its package, ended alone. A time-out or a crash counts as a kill only when it repeats; a
-// pass, a test failure or a build failure is its own verdict; anything else is unclassified.
+// pass or a test failure is its own verdict. Anything else is unclassified, a build failure
+// included: the first run built the same code.
 func aloneStatus(first, alone outcome) mutator.Status {
 	switch {
-	case alone == timedOut && first == timedOut:
+	case repeats(first, alone) && alone == timedOut:
 		return mutator.TimedOut
-	case alone == crashed && first == crashed:
+	case repeats(first, alone):
 		return mutator.Killed
-	case alone.again():
-		return mutator.Unclassified
-	default:
+	case alone == passed || alone == failed:
 		return alone.status()
+	default:
+		return mutator.Unclassified
 	}
 }
 
@@ -97,7 +106,10 @@ func exitCode(err error) int {
 }
 
 // classify is the outcome of a go test -json run that exited with code and wrote ev; late says
-// that the run's time had passed. Exit status 2 is the go command refusing its flags.
+// that the run's time had passed. Exit status 2 is the go command refusing its flags. A build
+// failure is the mutant's only when the compiler names the mutated line of the mutant's own
+// package; a crash, only when the package's tests ran and failed with no test failing. Any other
+// failure, such as a go command that failed before running the package, is no verdict.
 func classify(late bool, code int, ev *events) outcome {
 	switch {
 	case late:
@@ -106,39 +118,37 @@ func classify(late bool, code int, ev *events) outcome {
 		return passed
 	case code == noExit || code > 1:
 		return broken
-	case code < 0:
-		return crashed
-	case ev.unbuilt:
+	case ev.buildFailed && ev.mutatedLine:
 		return unbuilt
+	case ev.buildFailed:
+		return broken
 	case ev.testFailed:
 		return failed
-	case ev.timedOut:
-		return timedOut
-	default:
+	case ev.packageFailed:
 		return crashed
+	default:
+		return broken
 	}
 }
 
-// maxEvent bounds an event line of go test -json: a longer one, an output line of that size, is
-// skipped, which no event classify reads can be.
-const maxEvent = 1 << 20
-
-// timeoutPanic starts the output line of a test binary past its -timeout.
-const timeoutPanic = "panic: test timed out after "
-
-// events reads the events go test -json writes, line by line as they come, and keeps what classify
-// needs: a build that failed, a test that failed, a test binary past its -timeout.
+// events reads the events go test -json writes for the package pkg, line by line as they come, and
+// keeps what classify needs. file and line are the mutated position, file an absolute path; dir
+// is the directory the go command runs in, which the compiler names files from.
 type events struct {
-	line       []byte
-	skip       bool // the line being read passed maxEvent
-	unbuilt    bool
-	testFailed bool
-	timedOut   bool
+	pkg, dir, file string
+	line           int
+
+	pending       []byte // the line being read
+	buildFailed   bool   // a package failed to build
+	mutatedLine   bool   // the compiler refused the mutated line of pkg
+	testFailed    bool
+	packageFailed bool // the package's tests failed
 }
 
 // event is the part of a test2json event that classify reads.
 type event struct {
 	Action      string
+	ImportPath  string
 	Test        string
 	FailedBuild string
 	Output      string
@@ -146,39 +156,55 @@ type event struct {
 
 func (e *events) Write(p []byte) (int, error) {
 	n := len(p)
-	for len(p) > 0 {
+	for {
 		end := bytes.IndexByte(p, '\n')
 		if end < 0 {
-			e.add(p)
+			e.pending = append(e.pending, p...)
 
-			break
+			return n, nil
 		}
-		e.add(p[:end])
+		e.pending = append(e.pending, p[:end]...)
 		e.read()
 		p = p[end+1:]
 	}
-
-	return n, nil
 }
 
-// add appends p to the line being read, or skips the line once it passes maxEvent.
-func (e *events) add(p []byte) {
-	if e.skip || len(e.line)+len(p) > maxEvent {
-		e.skip, e.line = true, e.line[:0]
-
-		return
-	}
-	e.line = append(e.line, p...)
-}
-
-// read reads the complete line as an event; a line that is not one, such as a line of the go
-// command's own, says nothing.
+// read reads the complete line as an event; a line that is not one says nothing.
 func (e *events) read() {
 	var ev event
-	if !e.skip && json.Unmarshal(e.line, &ev) == nil {
-		e.unbuilt = e.unbuilt || ev.Action == "build-fail" || (ev.Action == "fail" && ev.FailedBuild != "")
-		e.testFailed = e.testFailed || (ev.Action == "fail" && ev.Test != "")
-		e.timedOut = e.timedOut || (ev.Action == "output" && strings.HasPrefix(ev.Output, timeoutPanic))
+	if json.Unmarshal(e.pending, &ev) == nil {
+		failed := ev.Action == "fail"
+		e.buildFailed = e.buildFailed || ev.Action == "build-fail" || (failed && ev.FailedBuild != "")
+		e.mutatedLine = e.mutatedLine || (ev.Action == "build-output" && e.ownPackage(ev.ImportPath) && e.namesMutatedLine(ev.Output))
+		e.testFailed = e.testFailed || (failed && ev.Test != "")
+		e.packageFailed = e.packageFailed || (failed && ev.Test == "" && ev.FailedBuild == "")
 	}
-	e.skip, e.line = false, e.line[:0]
+	e.pending = e.pending[:0]
+}
+
+// ownPackage reports whether importPath, as a build event names it, is pkg or pkg's test variant
+// ("pkg [pkg.test]").
+func (e *events) ownPackage(importPath string) bool {
+	name, _, _ := strings.Cut(importPath, " [")
+
+	return name == e.pkg
+}
+
+// namesMutatedLine reports whether a compiler message, "<file>:<line>:<column>: <text>" with the
+// file named from the go command's directory, is about the mutated line.
+func (e *events) namesMutatedLine(message string) bool {
+	name, rest, found := strings.Cut(message, ".go:")
+	if !found {
+		return false
+	}
+	line, _, found := strings.Cut(rest, ":")
+	if !found || line != strconv.Itoa(e.line) {
+		return false
+	}
+	file := name + ".go"
+	if !filepath.IsAbs(file) {
+		file = filepath.Join(e.dir, file)
+	}
+
+	return filepath.Clean(file) == filepath.Clean(e.file)
 }

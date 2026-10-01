@@ -123,12 +123,12 @@ func runMutant(t *testing.T, mut *mutantStub, got *commands, elapsed time.Durati
 }
 
 // newDealer is a dealer starting its commands with exec, its package's tests lasting
-// expectedTimeout.
+// aloneElapsed.
 func newDealer(t *testing.T, exec execContext, opts ...engine.ExecutorDealerOption) *engine.MutantExecutorDealer {
 	t.Helper()
 	mod := gomodule.GoModule{Name: expectedModule, Root: t.TempDir(), CallingDir: "."}
 
-	return engine.NewExecutorDealer(mod, tempDealer{newWdDealerStub(t)}, expectedTimeout,
+	return engine.NewExecutorDealer(mod, tempDealer{newWdDealerStub(t)}, aloneElapsed,
 		append([]engine.ExecutorDealerOption{engine.WithExecContext(exec)}, opts...)...)
 }
 
@@ -235,8 +235,10 @@ var confirmCases = []struct {
 	{"a sampled kill every test agrees with", fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, 100, false, mutator.Killed, 2, false, ""},
 	{"a sampled kill every test disagrees with", fakeExecCommandTestsFailure, fakeExecCommandSuccess, 100, false, mutator.Lived, 2, false, "SELECTION DISAGREES"},
 	{"a subset that does not build", fakeExecCommandBuildFailure, fakeExecCommandSuccess, 0, false, mutator.NotViable, 1, false, ""},
-	{"a time-out of a subset that hangs unmutated", binaryLate, fakeExecCommandSuccess, 0, true, mutator.Lived, 2, false, failTogether},
-	{"a time-out of a subset that passes unmutated", binaryLate, fakeExecCommandSuccess, 0, false, mutator.TimedOut, 1, true, ""},
+	{"a time-out of a subset that hangs unmutated", hanging, fakeExecCommandSuccess, 0, true, mutator.Lived, 2, false, failTogether},
+	{"a time-out of a subset that passes unmutated", hanging, fakeExecCommandSuccess, 0, false, mutator.TimedOut, 1, true, ""},
+	{"a sampled kill whose every test times out", fakeExecCommandTestsFailure, hanging, 100, false, mutator.Killed, 2, true, ""},
+	{"a sampled kill whose every test crashes", fakeExecCommandTestsFailure, crashedBinary, 100, false, mutator.Killed, 2, true, ""},
 	{"a crash of a subset that fails unmutated", crashedBinary, fakeExecCommandSuccess, 0, true, mutator.Lived, 2, false, failTogether},
 	{"a crash of a subset that passes unmutated", crashedBinary, fakeExecCommandSuccess, 0, false, mutator.Unclassified, 1, true, ""},
 }

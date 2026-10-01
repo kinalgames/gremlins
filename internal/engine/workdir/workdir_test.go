@@ -278,6 +278,92 @@ func TestErrors(t *testing.T) {
 	})
 }
 
+// chmod sets dir's permissions, through its ACL on Windows, and restores them when the test ends.
+func chmod(t *testing.T, dir string, mode os.FileMode) {
+	t.Helper()
+	set := os.Chmod
+	if runtime.GOOS == "windows" {
+		set = acl.Chmod
+	}
+	if err := set(dir, mode); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = set(dir, 0o700) })
+}
+
+func TestRenewReplacesACopyWithAFreshOne(t *testing.T) {
+	srcDir := t.TempDir()
+	populateSrcDir(t, srcDir, 1)
+	dealer := workdir.NewCachedDealer(t.TempDir(), srcDir)
+	defer dealer.Clean()
+	old, err := dealer.Get("w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(old, "srcfile-0")); err != nil { // as a mutant can leave it
+		t.Fatal(err)
+	}
+	renewed, err := dealer.Renew("w")
+	if err != nil || renewed == old {
+		t.Fatalf("renewed %s from %s: %v", renewed, old, err)
+	}
+	if err := filepath.Walk(srcDir, checkForDifferentFile(t, srcDir, renewed)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := dealer.Get("w"); got != renewed {
+		t.Errorf("Get answers %s after the renewal to %s", got, renewed)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("the replaced copy remains: %v", err)
+	}
+}
+
+func TestRenewOfANameWithoutACopyMakesOne(t *testing.T) {
+	srcDir := t.TempDir()
+	populateSrcDir(t, srcDir, 0)
+	dealer := workdir.NewCachedDealer(t.TempDir(), srcDir)
+	defer dealer.Clean()
+	renewed, err := dealer.Renew("w")
+	if got, _ := dealer.Get("w"); err != nil || got != renewed {
+		t.Fatalf("renewed %s, then Get %s: %v", renewed, got, err)
+	}
+}
+
+func TestACopyThatCannotBeRemovedIsStillReplaced(t *testing.T) {
+	srcDir := t.TempDir()
+	populateSrcDir(t, srcDir, 1)
+	dealer := workdir.NewCachedDealer(t.TempDir(), srcDir)
+	old, err := dealer.Get("w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chmod(t, old, 0o500)
+	renewed, err := dealer.Renew("w")
+	if got, _ := dealer.Get("w"); err != nil || got != renewed || renewed == old {
+		t.Fatalf("renewed %s from %s, then Get %s: %v", renewed, old, got, err)
+	}
+}
+
+func TestAFailedRenewalKeepsTheCopyAndLeavesNoPartOfTheNewOne(t *testing.T) {
+	srcDir := t.TempDir()
+	populateSrcDir(t, srcDir, 1)
+	wdDir := t.TempDir()
+	dealer := workdir.NewCachedDealer(wdDir, srcDir)
+	defer dealer.Clean()
+	old, err := dealer.Get("w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chmod(t, filepath.Join(srcDir, "srcdir-0"), 0o000)
+	if _, err := dealer.Renew("w"); err == nil {
+		t.Fatal("renewed a copy of an unreadable source")
+	}
+	entries, err := os.ReadDir(wdDir)
+	if got, _ := dealer.Get("w"); err != nil || got != old || len(entries) != 1 {
+		t.Fatalf("Get %s, want %s; %d entries in the working directory: %v", got, old, len(entries), err)
+	}
+}
+
 func TestWorkDirReturnsTheRootWorkingDir(t *testing.T) {
 	srcDir := t.TempDir()
 	populateSrcDir(t, srcDir, 0)

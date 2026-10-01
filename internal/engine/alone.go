@@ -23,6 +23,7 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/go-gremlins/gremlins/internal/log"
 	"github.com/go-gremlins/gremlins/internal/mutator"
 )
 
@@ -39,10 +40,12 @@ type Settler interface {
 }
 
 // subsetKill is a mutant a selection subset killed in pkg; confirmed says the whole suite killed
-// it too.
+// it too, recheck that the whole suite ran on it and neither passed nor failed, so Settle confirms
+// it.
 type subsetKill struct {
 	pkg       string
 	confirmed bool
+	recheck   bool
 }
 
 // unsettled is what Settle needs of a run: the outcomes that run again alone and the subset kills.
@@ -78,20 +81,24 @@ func (u *unsettled) pending(mut mutator.Mutator) bool {
 	return again || (killed && !k.confirmed)
 }
 
-// lowestKills are, in id order, the lowest subset kill of each package when the whole suite has not
-// confirmed it.
-func (u *unsettled) lowestKills() []mutator.Mutator {
+// confirmations are, in id order, the subset kills Settle confirms with every test before any
+// other mutant: the lowest subset kill of each package when the whole suite has not confirmed it,
+// and every kill to recheck.
+func (u *unsettled) confirmations() []mutator.Mutator {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	lowest := map[string]mutator.Mutator{}
+	var muts []mutator.Mutator
 	for mut, k := range u.kills {
 		if l, found := lowest[k.pkg]; !found || byID(mut, l) < 0 {
 			lowest[k.pkg] = mut
 		}
+		if k.recheck {
+			muts = append(muts, mut)
+		}
 	}
-	var muts []mutator.Mutator
 	for _, mut := range lowest {
-		if !u.kills[mut].confirmed {
+		if k := u.kills[mut]; !k.confirmed && !k.recheck {
 			muts = append(muts, mut)
 		}
 	}
@@ -130,14 +137,15 @@ func (m MutantExecutorDealer) Pending(mut mutator.Mutator) bool {
 
 // Settle gives the pending mutants their verdicts, one at a time and in id order, so that the
 // verdicts do not depend on which mutant ended first: it confirms each package's lowest subset
-// kill with every test, disabling the package's selection when every test disagrees; it runs each
-// time-out and crash again alone; and it confirms every other subset kill of a disabled package.
+// kill, and each kill to recheck, with every test, disabling the package's selection when every
+// test lets the mutant live; it runs each time-out and crash again alone; and it confirms every
+// other subset kill of a disabled package.
 func (m MutantExecutorDealer) Settle(ctx context.Context, muts []mutator.Mutator) {
 	settled := map[mutator.Mutator]bool{}
-	for _, mut := range m.unsettled.lowestKills() {
+	for _, mut := range m.unsettled.confirmations() {
 		settled[mut] = true
-		if o, ran := m.runAlone(ctx, mut, failed); ran && o != failed {
-			m.selector.Disable(mut.Pkg(), fmt.Errorf("the selected tests killed the mutant %s, every test let it end %s", mutantID(mut), o.status()))
+		if m.runAlone(ctx, mut, failed) == passed {
+			m.selector.Disable(mut.Pkg(), fmt.Errorf("the selected tests killed the mutant %s, every test let it live", mutantID(mut)))
 		}
 	}
 	muts = slices.Clone(muts)
@@ -158,18 +166,41 @@ func (m MutantExecutorDealer) Settle(ctx context.Context, muts []mutator.Mutator
 }
 
 // runAlone runs mut again with every test of its package, in a work directory of its own, and
-// gives it the verdict of its first outcome and this run's (aloneStatus); it reports the outcome
-// and whether the run took place: a cancelled run leaves mut UNCLASSIFIED.
-func (m MutantExecutorDealer) runAlone(ctx context.Context, mut mutator.Mutator, first outcome) (outcome, bool) {
+// gives it the verdict of its first outcome and this run's (aloneStatus); it reports the outcome.
+// A time-out or a crash that repeats counts only if every test passes on the unmutated code in the
+// same place: what failed may be the place, such as a database that went away, not the mutant. A
+// cancelled run, or a copy that does not hold the source, leaves mut UNCLASSIFIED.
+func (m MutantExecutorDealer) runAlone(ctx context.Context, mut mutator.Mutator, first outcome) outcome {
 	if !checkDone(ctx) {
 		mut.SetStatus(mutator.Unclassified)
 
-		return broken, false
+		return broken
 	}
 	e := m.executor(mut, nil, nil)
 	rootDir := e.workdir(aloneWorker)
-	o := e.test(func() outcome { return e.runSuite(rootDir, mut.Pkg(), "") })
-	mut.SetStatus(aloneStatus(first, o))
+	if !e.holdsSource(aloneWorker) {
+		mut.SetStatus(mutator.Unclassified)
 
-	return o, true
+		return broken
+	}
+	o := e.test(aloneWorker, func() outcome { return e.runSuite(rootDir, mut.Pkg(), "") })
+	status := aloneStatus(first, o)
+	if repeats(first, o) && e.unmutated() != passed {
+		log.Errorf("the mutant at %s ended %s again alone, and so did the unmutated code, so it is UNCLASSIFIED\n", mut.Position(), o.status())
+		status = mutator.Unclassified
+	}
+	mut.SetStatus(status)
+
+	return o
+}
+
+// unmutated is how every test of the mutant's package ends on the unmutated code in the copy of
+// the mutants that run alone, with the mutant's arguments and time; broken when that copy does not
+// hold the source.
+func (m *mutantExecutor) unmutated() outcome {
+	if m.copies.reason(aloneWorker) != nil {
+		return broken
+	}
+
+	return m.runSuite(m.workdir(aloneWorker), m.mutant.Pkg(), "")
 }

@@ -169,11 +169,7 @@ func TestMutatorTestExecution(t *testing.T) {
 			mjd := engine.NewExecutorDealer(mod, wdDealer, expectedTimeout,
 				engine.WithExecContext(fakeExecCommandWithHolder(holder, tc.testResult)),
 			)
-			mut := &mutantStub{
-				status:  tc.mutantStatus,
-				mutType: mutator.ConditionalsBoundary,
-				pkg:     "example.com",
-			}
+			mut := mutantAt(tc.mutantStatus, 3)
 			outCh := make(chan mutator.Mutator)
 			wg := sync.WaitGroup{}
 			wg.Add(1)
@@ -310,7 +306,7 @@ func TestMutatorRun(t *testing.T) {
 			if tc.timeoutCoefficient != 0 {
 				wantTimeout = 2*time.Second + expectedTimeout*time.Duration(tc.timeoutCoefficient)
 			}
-			want := fmt.Sprintf("go test -json -tags %s -timeout %s -failfast %s", tc.tags, wantTimeout, tc.wantPath)
+			want := fmt.Sprintf("go test -json -vet=off -tags %s -timeout %s -failfast %s", tc.tags, wantTimeout, tc.wantPath)
 			got := fmt.Sprintf("go %v", strings.Join(holder.args, " "))
 
 			if !cmp.Equal(got, want) {
@@ -437,12 +433,14 @@ func TestProcessTestsFailure(_ *testing.T) {
 	os.Exit(1) // skipcq: RVV-A0003
 }
 
-// TestProcessBuildFailure fails as go test -json does when the package does not build.
+// TestProcessBuildFailure fails as go test -json does when line 3 of a.go in example.com/p does
+// not build.
 func TestProcessBuildFailure(_ *testing.T) {
 	if os.Getenv("GO_TEST_PROCESS") != "1" {
 		return
 	}
-	_, _ = os.Stdout.WriteString(`{"Action":"build-fail","ImportPath":"example.com/p [example.com/p.test]"}` + "\n")
+	_, _ = os.Stdout.WriteString(`{"ImportPath":"example.com/p [example.com/p.test]","Action":"build-output","Output":"./a.go:3:2: undefined: x\n"}` + "\n" +
+		`{"Action":"build-fail","ImportPath":"example.com/p [example.com/p.test]"}` + "\n")
 	os.Exit(1) // skipcq: RVV-A0003
 }
 

@@ -17,6 +17,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -62,6 +63,7 @@ type MutantExecutorDealer struct {
 	testExecutionTime time.Duration
 	selector          *selection.Selector
 	unsettled         *unsettled
+	copies            *copies
 	dryRun            bool
 	integrationMode   bool
 	testCPU           int
@@ -117,6 +119,7 @@ func NewExecutorDealer(mod gomodule.GoModule, wdd workdir.Dealer, elapsed time.D
 		testExecutionTime: elapsed * time.Duration(coefficient),
 		execContext:       exec.CommandContext,
 		unsettled:         newUnsettled(),
+		copies:            &copies{spoiled: map[string]error{}},
 	}
 
 	for _, opt := range opts {
@@ -179,6 +182,7 @@ func (m MutantExecutorDealer) executor(mut mutator.Mutator, outCh chan<- mutator
 		testExecutionTime: m.testExecutionTime,
 		selector:          m.selector,
 		unsettled:         m.unsettled,
+		copies:            m.copies,
 	}
 }
 
@@ -195,6 +199,7 @@ type mutantExecutor struct {
 	testExecutionTime time.Duration
 	selector          *selection.Selector
 	unsettled         *unsettled
+	copies            *copies
 	dryRun            bool
 	integrationMode   bool
 	testCPU           int
@@ -213,7 +218,8 @@ type mutantExecutor struct {
 // crashed is recorded to run again alone (Settler).
 func (m *mutantExecutor) Start(w *workerpool.Worker) {
 	defer m.wg.Done()
-	rootDir := m.workdir(fmt.Sprintf("%s-%d", w.Name, w.ID))
+	name := fmt.Sprintf("%s-%d", w.Name, w.ID)
+	rootDir := m.workdir(name)
 
 	if m.mutant.Status() == mutator.NotCovered || m.mutant.Status() == mutator.Skipped || m.dryRun {
 		m.outCh <- m.mutant
@@ -221,7 +227,10 @@ func (m *mutantExecutor) Start(w *workerpool.Worker) {
 		return
 	}
 
-	o := m.test(func() outcome { return m.runTests(rootDir, m.mutant.Pkg()) })
+	o := broken
+	if m.holdsSource(name) {
+		o = m.test(name, func() outcome { return m.runTests(rootDir, m.mutant.Pkg()) })
+	}
 	if o.again() {
 		m.unsettled.runAgain(m.mutant, o)
 	}
@@ -242,20 +251,84 @@ func (m *mutantExecutor) workdir(name string) string {
 	return rootDir
 }
 
-// test applies the mutant, runs run on it and restores the code. A mutant that cannot be applied
-// ends broken.
-func (m *mutantExecutor) test(run func() outcome) outcome {
+// test applies the mutant to the copy of the work directory name, runs run on it and restores the
+// code. A mutant that cannot be applied ends broken. A copy the mutant cannot be restored in is
+// replaced with a fresh copy of the source (renew).
+func (m *mutantExecutor) test(name string, run func() outcome) outcome {
 	if err := m.mutant.Apply(); err != nil {
-		log.Errorf("failed to apply mutation at %s - %s\n\t%v", m.mutant.Position(), m.mutant.Status(), err)
+		log.Errorf("failed to apply mutation at %s - %s\n\t%v\n", m.mutant.Position(), m.mutant.Status(), err)
 
 		return broken
 	}
 	o := run()
 	if err := m.mutant.Rollback(); err != nil {
-		log.Errorf("failed to restore mutation at %s - %s\n\t%v", m.mutant.Position(), m.mutant.Status(), err)
+		log.Errorf("failed to restore mutation at %s - %s\n\t%v\n", m.mutant.Position(), m.mutant.Status(), err)
+		m.renew(name)
 	}
 
 	return o
+}
+
+// copies are the work directories whose copy no longer holds the source, each with the reason.
+type copies struct {
+	mu      sync.Mutex
+	spoiled map[string]error
+}
+
+func (c *copies) spoil(name string, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.spoiled[name] = err
+}
+
+func (c *copies) reason(name string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.spoiled[name]
+}
+
+// renew replaces the copy of the work directory name, where a mutant could not be restored, with a
+// fresh copy of the source whose mutated file matches the source's. When that fails, the copy's
+// later mutants run no test (holdsSource).
+func (m *mutantExecutor) renew(name string) {
+	root, err := m.wdDealer.Renew(name)
+	if err == nil {
+		err = m.sameAsSource(root)
+	}
+	if err != nil {
+		m.copies.spoil(name, err)
+		log.Errorf("failed to renew the copy of %s, so its later mutants are UNCLASSIFIED\n\t%v\n", name, err)
+	}
+}
+
+// sameAsSource checks that the mutant's file in the copy at root holds the source's bytes.
+func (m *mutantExecutor) sameAsSource(root string) error {
+	name := filepath.Join(m.module.CallingDir, m.mutant.Position().Filename)
+	src, err := os.ReadFile(filepath.Join(m.module.Root, name)) //nolint:gosec // a file of the module under test
+	if err != nil {
+		return err
+	}
+	copied, err := os.ReadFile(filepath.Join(root, name)) //nolint:gosec // the same file in a copy of the module
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(src, copied) {
+		return fmt.Errorf("%s differs from the source", filepath.Join(root, name))
+	}
+
+	return nil
+}
+
+// holdsSource reports whether the copy of the work directory name holds the source; when it does
+// not, the mutant is UNCLASSIFIED, with the reason logged.
+func (m *mutantExecutor) holdsSource(name string) bool {
+	err := m.copies.reason(name)
+	if err != nil {
+		log.Errorf("the copy of %s does not hold the source, so the mutant at %s runs no test\n\t%v\n", name, m.mutant.Position(), err)
+	}
+
+	return err == nil
 }
 
 // runTests runs the mutant's tests: the subset the selection chooses, its verdict confirmed where
@@ -274,10 +347,10 @@ func (m *mutantExecutor) runTests(rootDir, pkg string) outcome {
 // confirm is the verdict of a subset run that ended o, once checked against the whole suite where
 // the two can differ. A survivor runs every test, since a test that kills it may have been left out
 // or need the tests before it. A kill, a time-out or a crash runs every test when the subset fails
-// on the unmutated code too. A kill runs every test when it is in the sample (Sampled), and a
-// disagreement makes the package's later mutants run every test; any other kill is recorded for
-// Settle. A build failure, or a run that could not be carried out, is its own verdict; a time-out
-// or a crash runs again alone, with every test.
+// on the unmutated code too. A kill runs every test when it is in the sample (Sampled): a pass
+// makes the package's later mutants run every test, and a run that neither passes nor fails is
+// confirmed again by Settle, as is any other kill. A build failure, or a run that could not be
+// carried out, is its own verdict; a time-out or a crash runs again alone, with every test.
 func (m *mutantExecutor) confirm(rootDir, pkg, pattern string, o outcome) outcome {
 	switch {
 	case o == passed:
@@ -296,13 +369,14 @@ func (m *mutantExecutor) confirm(rootDir, pkg, pattern string, o outcome) outcom
 		return o
 	}
 	full := m.runSuite(rootDir, pkg, "")
-	if full == failed {
-		m.unsettled.kill(m.mutant, subsetKill{pkg: pkg, confirmed: true})
-	} else {
-		m.selector.Disable(pkg, fmt.Errorf("the tests %s killed the mutant %s, every test let it end %s", pattern, id, full.status()))
-	}
+	if full == passed {
+		m.selector.Disable(pkg, fmt.Errorf("the tests %s killed the mutant %s, every test let it live", pattern, id))
 
-	return full
+		return passed
+	}
+	m.unsettled.kill(m.mutant, subsetKill{pkg: pkg, confirmed: full == failed, recheck: full != failed})
+
+	return failed
 }
 
 // runSuite runs the tests of pkg that pattern selects (every test for "") on the mutant, within
@@ -318,7 +392,8 @@ func (m *mutantExecutor) runSuite(rootDir, pkg, pattern string) outcome {
 	}
 	cmd.Env = append(cmd.Env, os.Environ()...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("GOTMPDIR=%s", m.wdDealer.WorkDir()))
-	ev := &events{}
+	pos := m.mutant.Position()
+	ev := &events{pkg: pkg, dir: cmd.Dir, file: filepath.Join(m.mutant.Workdir(), pos.Filename), line: pos.Line}
 	cmd.Stdout = ev
 	killTree(cmd)
 	cmd.WaitDelay = waitDelay
@@ -340,7 +415,9 @@ func (m *mutantExecutor) selectedTests(pkg string) string {
 }
 
 func (m *mutantExecutor) getTestArgs(pkg, pattern string) []string {
-	args := []string{"test", "-json"}
+	// Vet refuses some mutants that build before any test runs on them: INVERT_LOGICAL turns
+	// `x == a || x == b` into `x == a && x == b`, which vet reports as a suspect and.
+	args := []string{"test", "-json", "-vet=off"}
 	if m.buildTags != "" {
 		args = append(args, "-tags", m.buildTags)
 	}
@@ -367,7 +444,7 @@ func (m *mutantExecutor) getTestArgs(pkg, pattern string) []string {
 }
 
 func run(cmd *exec.Cmd) (func(), error) {
-	if err := cmd.Run(); err != nil {
+	if err := runTree(cmd); err != nil {
 
 		return func() {}, err
 	}

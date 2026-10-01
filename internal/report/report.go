@@ -91,8 +91,9 @@ func newReport(results Results) (*reportStatus, bool) {
 		reportMutatorType(m, rep)
 	}
 	if !rep.isDryRun() {
+		// A mutant no run reached a verdict on is not one the tests killed.
 		if rep.killed > 0 {
-			rep.tEfficacy = float64(rep.killed) / float64(rep.killed+rep.lived) * 100
+			rep.tEfficacy = float64(rep.killed) / float64(rep.killed+rep.lived+rep.unclassified) * 100
 		}
 		if rep.killed+rep.lived > 0 {
 			rep.mCovered = float64(rep.killed+rep.lived) / float64(rep.killed+rep.lived+rep.notCovered) * 100

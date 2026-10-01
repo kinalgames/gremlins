@@ -98,7 +98,7 @@ func longExplainer() string {
 
 		Thresholds are configurable quality gates that make gremlins exit with an error 
 		if those values are not met. Efficacy is the percent of KILLED mutants over
-		the total KILLED and LIVED mutants. Mutant coverage is the percent of total
+		the total KILLED, LIVED and UNCLASSIFIED mutants. Mutant coverage is the percent of total
 		KILLED + LIVED mutants, over the total mutants.
 	`)
 }

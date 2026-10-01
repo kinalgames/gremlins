@@ -35,9 +35,11 @@ import (
 // It has two methods:
 //
 //		Get that returns a folder name that will be used by Gremlins as workdir.
+//		Renew that replaces the folder of an identifier with a fresh copy.
 //	    Clean that must be called to remove all the created folders.
 type Dealer interface {
 	Get(idf string) (string, error)
+	Renew(idf string) (string, error)
 	Clean()
 	WorkDir() string
 }
@@ -75,16 +77,45 @@ func (cd *CachedDealer) Get(idf string) (string, error) {
 		return dstDir, nil
 	}
 
-	dstDir, err := os.MkdirTemp(cd.workDir, "wd-*")
-	if err != nil {
-		return "", err
-	}
-	err = filepath.Walk(cd.srcDir, cd.copyTo(dstDir))
+	dstDir, err := cd.copySource()
 	if err != nil {
 		return "", err
 	}
 
 	cd.setCache(idf, dstDir)
+
+	return dstDir, nil
+}
+
+// Renew replaces the working directory of idf with a fresh copy of the source directory, and
+// removes the one it replaces: a copy a mutation could not be undone in no longer holds the source.
+// On failure, idf keeps its working directory.
+func (cd *CachedDealer) Renew(idf string) (string, error) {
+	dstDir, err := cd.copySource()
+	if err != nil {
+		return "", err
+	}
+	old, ok := cd.fromCache(idf)
+	cd.setCache(idf, dstDir)
+	if ok {
+		if err := os.RemoveAll(old); err != nil {
+			log.Errorf("impossible to remove temporary folder %s: %s\n", old, err)
+		}
+	}
+
+	return dstDir, nil
+}
+
+// copySource copies the source directory into a new folder of the working directory; a copy that
+// fails is removed.
+func (cd *CachedDealer) copySource() (string, error) {
+	dstDir, err := os.MkdirTemp(cd.workDir, "wd-*")
+	if err != nil {
+		return "", err
+	}
+	if err := filepath.Walk(cd.srcDir, cd.copyTo(dstDir)); err != nil {
+		return "", errors.Join(err, os.RemoveAll(dstDir))
+	}
 
 	return dstDir, nil
 }

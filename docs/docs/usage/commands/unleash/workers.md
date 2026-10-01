@@ -16,7 +16,8 @@ A rule of thumb may be setting it so that the sum of _workers_ and _test CPU_ is
 of the machine.
 
 A mutant that timed out runs again alone once every other mutant has run, and is `TIMED OUT` only if it times out
-again; otherwise it takes the verdict of its run alone, or `UNCLASSIFIED`. A timed-out run ends with every process it
+again and every test then passes on the unmutated code in the same place; otherwise it takes the verdict of its run
+alone, or `UNCLASSIFIED`. A timed-out run ends with every process it
 started. The symptom of a run excessively stressed
 is the number of mutants that time out, and with them the time the runs alone add. You should tweak the two
 values above until your runs stabilize on a low and constant number of `TIMED OUT` mutants. To understand what could be

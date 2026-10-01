@@ -17,6 +17,7 @@
 package engine
 
 import (
+	"os"
 	"os/exec"
 	"strconv"
 )
@@ -33,3 +34,11 @@ func killTree(cmd *exec.Cmd) {
 		return nil
 	}
 }
+
+// runTree runs cmd. Its processes share Gremlins' console, which delivers a Ctrl-C to them too.
+func runTree(cmd *exec.Cmd) error {
+	return cmd.Run()
+}
+
+// Interrupt does nothing on Windows: a run's processes receive the console's Ctrl-C themselves.
+func Interrupt(os.Signal) {}

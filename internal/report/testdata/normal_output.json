@@ -1,6 +1,6 @@
 {
   "go_module": "example.com/go/module",
-  "test_efficacy": 57.14285714285714,
+  "test_efficacy": 50,
   "mutations_coverage": 70,
   "mutants_total": 11,
   "mutants_killed": 4,

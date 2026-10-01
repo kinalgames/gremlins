@@ -30,8 +30,8 @@
 // process. The engine guards a subset's verdict where that assumption can fail: a subset's kill,
 // time-out or crash counts only if the same subset passes on the unmutated code; every survivor,
 // a fixed sample of the kills and each package's lowest kill run again with the whole suite; and a
-// package whose confirmation disagrees runs the whole suite for the rest of the run, its other
-// kills included. What remains is a mutant that itself leaves state behind for a later selected
+// package where the whole suite lets such a kill live runs the whole suite for the rest of the
+// run, its other kills included. What remains is a mutant that itself leaves state behind for a later selected
 // test, outside the confirmed kills: a test does fail on it, and the same tests pass together on
 // the unmutated code.
 package selection

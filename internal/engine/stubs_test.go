@@ -77,8 +77,9 @@ func filenameFromFixture(fix string) string {
 }
 
 type dealerStub struct {
-	t     *testing.T
-	fnGet func(idf string) (string, error)
+	t       *testing.T
+	fnGet   func(idf string) (string, error)
+	fnRenew func(idf string) (string, error) // nil: no copy can be renewed
 }
 
 func newWdDealerStub(t *testing.T) *dealerStub {
@@ -91,6 +92,14 @@ func newWdDealerStub(t *testing.T) *dealerStub {
 
 func (d dealerStub) Get(idf string) (string, error) {
 	return d.fnGet(idf)
+}
+
+func (d dealerStub) Renew(idf string) (string, error) {
+	if d.fnRenew == nil {
+		return "", errors.New("no copy to renew")
+	}
+
+	return d.fnRenew(idf)
 }
 
 func (dealerStub) Clean() {}

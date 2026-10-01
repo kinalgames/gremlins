@@ -357,7 +357,8 @@ When set, it makes Gremlins exit with an error (code 10) if the _test efficacy_ 
 zero, which
 means Gremlins never exits with an error.
 
-The _test efficacy_ is calculated as `KILLED / (KILLED + LIVED)` and assesses how effective are the tests.
+The _test efficacy_ is calculated as `KILLED / (KILLED + LIVED + UNCLASSIFIED)` and assesses how effective are the tests:
+a mutant no run reached a verdict on is not one the tests killed.
 
 ```shell
 gremlins unleash --threshold-efficacy 80
@@ -422,9 +423,11 @@ Gremlins checks the subset's verdict with every test of the package:
   runs and its verdict stands. A subset that hangs on the unmutated code fails this check;
 - a deterministic share of the kills (`--test-selection-confirm`) runs every test at once, and
   once every mutant has run, each package's lowest kill (by file, line, column and type) runs
-  every test too. If every test disagrees, Gremlins logs `SELECTION DISAGREES WITH THE WHOLE
-  SUITE`, runs every test for the package's remaining mutants, and runs every test again for each
-  of its kills that no whole suite confirmed;
+  every test too, as does each sampled kill whose whole suite neither passed nor failed. If every
+  test passes on such a kill, Gremlins logs `SELECTION DISAGREES WITH THE WHOLE SUITE`, runs every
+  test for the package's remaining mutants, and runs every test again for each of its kills that no
+  whole suite confirmed. A whole suite that times out or crashes on a kill disables nothing; if it
+  does so when the kill runs alone too, the kill is `UNCLASSIFIED`;
 - a subset that timed out or crashed runs again alone with every test, as any such mutant does.
 
 The verdicts do not depend on which mutant ends first. What these checks do not catch is a

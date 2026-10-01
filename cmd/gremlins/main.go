@@ -29,6 +29,7 @@ import (
 	"github.com/fatih/color"
 
 	"github.com/go-gremlins/gremlins/cmd"
+	"github.com/go-gremlins/gremlins/internal/engine"
 	"github.com/go-gremlins/gremlins/internal/execution"
 	"github.com/go-gremlins/gremlins/internal/log"
 )
@@ -58,7 +59,8 @@ func ctxDoneOnSignal() context.Context {
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		<-done
+		sig := <-done
+		engine.Interrupt(sig) // the runs under way lead process groups of their own
 		cancel()
 		close(done)
 	}()

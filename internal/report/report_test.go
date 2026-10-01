@@ -70,7 +70,7 @@ func TestReport(t *testing.T) {
 				testingLine +
 				"Killed: 1, Lived: 1, Not covered: 1\n" +
 				"Timed out: 1, Not viable: 1, Skipped: 1, Unclassified: 1\n" +
-				"Test efficacy: 50.00%\n" +
+				"Test efficacy: 33.33%\n" +
 				"Mutator coverage: 66.67%\n",
 		},
 		{
