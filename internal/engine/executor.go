@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"github.com/go-gremlins/gremlins/internal/gomodule"
 	"github.com/go-gremlins/gremlins/internal/log"
 	"github.com/go-gremlins/gremlins/internal/mutator"
+	"github.com/go-gremlins/gremlins/internal/selection"
 )
 
 // DefaultTimeoutCoefficient is the default multiplier for the timeout length
@@ -57,6 +59,7 @@ type MutantExecutorDealer struct {
 	mod               gomodule.GoModule
 	buildTags         string
 	testExecutionTime time.Duration
+	selector          *selection.Selector
 	dryRun            bool
 	integrationMode   bool
 	testCPU           int
@@ -74,7 +77,18 @@ func WithExecContext(c execContext) ExecutorDealerOption {
 	}
 }
 
-// NewExecutorDealer initialises a MutantExecutorDealer.
+// WithSelector makes each mutant run only the tests the selector chooses for it.
+func WithSelector(s *selection.Selector) ExecutorDealerOption {
+	return func(m MutantExecutorDealer) MutantExecutorDealer {
+		m.selector = s
+
+		return m
+	}
+}
+
+// NewExecutorDealer initialises a MutantExecutorDealer. With test selection on (and integration
+// mode off), each mutant runs only the tests of its package that cover its position
+// (package selection).
 func NewExecutorDealer(mod gomodule.GoModule, wdd workdir.Dealer, elapsed time.Duration, opts ...ExecutorDealerOption) *MutantExecutorDealer {
 	buildTags := configuration.Get[string](configuration.UnleashTagsKey)
 	dryRun := configuration.Get[bool](configuration.UnleashDryRunKey)
@@ -105,8 +119,28 @@ func NewExecutorDealer(mod gomodule.GoModule, wdd workdir.Dealer, elapsed time.D
 	for _, opt := range opts {
 		jd = opt(jd)
 	}
+	if jd.selector == nil && configuration.Get[bool](configuration.UnleashTestSelectionKey) && !integrationMode {
+		jd.selector = newSelector(jd.execContext, mod, wdd.WorkDir(), buildTags, jd.testExecutionTime)
+	}
 
 	return &jd
+}
+
+// newSelector is the selector of the module's tests, building each package's index with the go
+// command, as many tests at once as there are workers.
+func newSelector(ec execContext, mod gomodule.GoModule, workDir, buildTags string, timeout time.Duration) *selection.Selector {
+	workers := configuration.Get[int](configuration.UnleashWorkersKey)
+	if workers == 0 {
+		workers = runtime.NumCPU()
+	}
+	builder := selection.GoBuilder{
+		Exec: ec, Module: mod, WorkDir: workDir, Tags: buildTags,
+		Parallelism: workers, Timeout: timeout,
+	}
+
+	return selection.New(builder, func(pkg string, err error) {
+		log.Errorf("test selection: every test of %s runs for each of its mutants: %v\n", pkg, err)
+	})
 }
 
 // NewExecutor returns a new workerpool.Executor for the given mutator.Mutator.
@@ -126,6 +160,7 @@ func (m MutantExecutorDealer) NewExecutor(mut mutator.Mutator, outCh chan<- muta
 		execContext:       m.execContext,
 		testCPU:           m.testCPU,
 		testExecutionTime: m.testExecutionTime,
+		selector:          m.selector,
 	}
 
 	return &mj
@@ -142,6 +177,7 @@ type mutantExecutor struct {
 	module            gomodule.GoModule
 	buildTags         string
 	testExecutionTime time.Duration
+	selector          *selection.Selector
 	dryRun            bool
 	integrationMode   bool
 	testCPU           int
@@ -195,7 +231,7 @@ func (m *mutantExecutor) runTests(rootDir, pkg string) mutator.Status {
 	ctx, cancel := context.WithTimeout(context.Background(), m.testExecutionTime)
 	defer cancel()
 
-	cmd := m.execContext(ctx, "go", m.getTestArgs(pkg)...)
+	cmd := m.execContext(ctx, "go", m.getTestArgs(pkg, m.selectedTests(pkg))...)
 	cmd.Dir = m.mutant.Workdir()
 	if m.integrationMode {
 		cmd.Dir = rootDir
@@ -217,7 +253,18 @@ func (m *mutantExecutor) runTests(rootDir, pkg string) mutator.Status {
 	return mutator.Lived
 }
 
-func (m *mutantExecutor) getTestArgs(pkg string) []string {
+// selectedTests is the -run pattern of the tests of pkg that cover the mutant's position, or ""
+// for every test: without a selector, in integration mode, or when no single test covers it.
+func (m *mutantExecutor) selectedTests(pkg string) string {
+	if m.selector == nil || m.integrationMode {
+		return ""
+	}
+	pattern, _ := m.selector.Pattern(pkg, m.mutant.Position())
+
+	return pattern
+}
+
+func (m *mutantExecutor) getTestArgs(pkg, run string) []string {
 	args := []string{"test"}
 	if m.buildTags != "" {
 		args = append(args, "-tags", m.buildTags)
@@ -230,6 +277,9 @@ func (m *mutantExecutor) getTestArgs(pkg string) []string {
 
 	if m.testCPU != 0 {
 		args = append(args, fmt.Sprintf("-cpu %d", m.testCPU))
+	}
+	if run != "" {
+		args = append(args, "-run", run)
 	}
 
 	path := pkg

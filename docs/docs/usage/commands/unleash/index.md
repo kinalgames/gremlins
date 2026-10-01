@@ -393,6 +393,26 @@ It is possible to override this coefficient (`0` means use the default).
 gremlins unleash --timeout-coefficient=3
 ```
 
+### Test selection
+
+:material-flag: `--test-selection` · :material-sign-direction: Default: `false`
+
+Gremlins runs, for each mutant, only the tests of its package that execute the mutated position,
+instead of the package's whole test suite. Before the first mutant of a package, it builds the
+package's test binary with coverage and runs each test, example and fuzz target alone, as many at
+a time as there are workers, to learn what each covers. Each of those runs executes the package's
+initialisation and `TestMain`, so a position that only package-level variables, `init` or
+`TestMain` reach selects every test.
+
+A mutant whose position no single test covers runs every test of its package; one the package's
+coverage does not reach is still NOT COVERED. If the package cannot be indexed (it does not build,
+or a test fails when it runs alone, for example because it depends on another test running
+first), every mutant of that package runs every test. The flag has no effect in integration mode.
+
+```shell
+gremlins unleash --test-selection
+```
+
 ### Workers
 
 :material-flag: `--workers` · :material-sign-direction: Default: `0`

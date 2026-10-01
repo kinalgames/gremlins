@@ -47,6 +47,7 @@ const (
 	UnleashDiffRef               = "unleash.diff"
 	UnleashThresholdEfficacyKey  = "unleash.threshold.efficacy"
 	UnleashThresholdMCoverageKey = "unleash.threshold.mutant-coverage"
+	UnleashTestSelectionKey      = "unleash.test-selection"
 )
 
 const (

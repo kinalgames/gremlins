@@ -59,6 +59,7 @@ const (
 	paramTestCPU            = "test-cpu"
 	paramWorkers            = "workers"
 	paramTimeoutCoefficient = "timeout-coefficient"
+	paramTestSelection      = "test-selection"
 
 	// Thresholds.
 	paramThresholdEfficacy  = "threshold-efficacy"
@@ -219,6 +220,7 @@ func setFlagsOnCmd(cmd *cobra.Command) error {
 		{Name: paramWorkers, CfgKey: configuration.UnleashWorkersKey, DefaultV: 0, Usage: "the number of workers to use in mutation testing"},
 		{Name: paramTestCPU, CfgKey: configuration.UnleashTestCPUKey, DefaultV: 0, Usage: "the number of CPUs to allow each test run to use"},
 		{Name: paramTimeoutCoefficient, CfgKey: configuration.UnleashTimeoutCoefficientKey, DefaultV: 0, Usage: "the coefficient by which the timeout is increased"},
+		{Name: paramTestSelection, CfgKey: configuration.UnleashTestSelectionKey, DefaultV: false, Usage: "run, for each mutant, only the tests that cover its position (each test's coverage is gathered once per package)"},
 	}
 
 	for _, f := range fls {

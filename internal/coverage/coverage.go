@@ -175,6 +175,12 @@ func (c *Coverage) scanPath() string {
 }
 
 func (c *Coverage) parse(data io.Reader) (Profile, error) {
+	return Parse(data, c.mod)
+}
+
+// Parse reads a coverage profile (go test -coverprofile) of the module mod into a Profile: the
+// blocks that ran at least once, by file name relative to the module's calling directory.
+func Parse(data io.Reader, mod gomodule.GoModule) (Profile, error) {
 	profiles, err := cover.ParseProfilesFromReader(data)
 	if err != nil {
 		return nil, err
@@ -191,7 +197,7 @@ func (c *Coverage) parse(data io.Reader) (Profile, error) {
 				EndLine:   b.EndLine,
 				EndCol:    b.EndCol,
 			}
-			fn := c.removeModuleFromPath(p)
+			fn := removeModuleFromPath(p, mod)
 			status[fn] = append(status[fn], block)
 		}
 	}
@@ -199,9 +205,9 @@ func (c *Coverage) parse(data io.Reader) (Profile, error) {
 	return status, nil
 }
 
-func (c *Coverage) removeModuleFromPath(p *cover.Profile) string {
-	path := strings.ReplaceAll(p.FileName, c.mod.Name+"/", "")
-	path, _ = filepath.Rel(c.mod.CallingDir, path)
+func removeModuleFromPath(p *cover.Profile, mod gomodule.GoModule) string {
+	path := strings.ReplaceAll(p.FileName, mod.Name+"/", "")
+	path, _ = filepath.Rel(mod.CallingDir, path)
 
 	return path
 }

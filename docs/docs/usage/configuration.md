@@ -55,6 +55,7 @@ unleash:
   workers: 0 #(1)
   test-cpu: 0 #(2)
   timeout-coefficient: 0 #(3)
+  test-selection: false
   threshold: #(4)
     efficacy: 0
     mutant-coverage: 0
