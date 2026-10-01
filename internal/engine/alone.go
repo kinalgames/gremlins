@@ -188,9 +188,11 @@ func (m MutantExecutorDealer) runAlone(ctx context.Context, mut mutator.Mutator,
 	}
 	o := e.test(aloneWorker, func() outcome { return e.runSuite(rootDir, mut.Pkg(), "") })
 	status := aloneStatus(first, o)
-	if repeats(first, o) && e.unmutated() != passed {
-		log.Errorf("the mutant at %s ended %s again alone, and so did the unmutated code, so it is UNCLASSIFIED\n", mut.Position(), o.status())
-		status = mutator.Unclassified
+	if repeats(first, o) {
+		if base := e.unmutated(); base != passed {
+			log.Errorf("the mutant at %s %s again alone, and every test %s on the unmutated code there, so it is UNCLASSIFIED\n", mut.Position(), o, base)
+			status = mutator.Unclassified
+		}
 	}
 	mut.SetStatus(status)
 

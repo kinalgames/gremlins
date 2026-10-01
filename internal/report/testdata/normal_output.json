@@ -2,12 +2,13 @@
   "go_module": "example.com/go/module",
   "test_efficacy": 50,
   "mutations_coverage": 70,
-  "mutants_total": 11,
+  "mutants_total": 12,
   "mutants_killed": 4,
   "mutants_lived": 3,
-  "mutants_not_viable": 2,
+  "mutants_not_viable": 3,
   "mutants_not_covered": 3,
   "mutants_unclassified": 1,
+  "mutants_pending": 2,
   "elapsed_time": 142.123,
   "mutator_statistics": {
     "arithmetic_base": 3,
@@ -20,7 +21,8 @@
     "invert_logical": 1,
     "invert_loop_ctrl": 1,
     "invert_negatives": 1,
-    "remove_self_assignments": 1
+    "remove_self_assignments": 1,
+    "extra": 1
   },
   "files": [
     {
@@ -119,6 +121,12 @@
           "column": 6,
           "type": "ARITHMETIC_BASE",
           "status": "TIMED OUT"
+        },
+        {
+          "line": 50,
+          "column": 7,
+          "type": "EXTRA",
+          "status": "NOT VIABLE"
         }
       ]
     }

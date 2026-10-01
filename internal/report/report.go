@@ -41,11 +41,13 @@ var (
 )
 
 // Results contains the list of mutator.Mutator to be reported
-// and the time it took to discover and test them.
+// and the time it took to discover and test them. Pending counts the mutants left out of
+// Mutants for a later run to give their verdicts (--settle-later).
 type Results struct {
 	Module  string
 	Mutants []mutator.Mutator
 	Elapsed time.Duration
+	Pending int
 }
 
 type reportStatus struct {
@@ -62,6 +64,7 @@ type reportStatus struct {
 	notViable    int
 	runnable     int
 	unclassified int
+	pending      int
 
 	mutatorStatistics internal.MutatorType
 
@@ -70,13 +73,14 @@ type reportStatus struct {
 }
 
 func newReport(results Results) (*reportStatus, bool) {
-	if len(results.Mutants) == 0 {
+	if len(results.Mutants) == 0 && results.Pending == 0 {
 
 		return nil, false
 	}
 	rep := &reportStatus{
 		module:  results.Module,
 		elapsed: durafmt.Parse(results.Elapsed).LimitFirstN(2),
+		pending: results.Pending,
 	}
 	rep.files = make(map[string][]internal.Mutation)
 	for _, m := range results.Mutants {
@@ -150,6 +154,8 @@ func reportMutatorType(m mutator.Mutator, rep *reportStatus) {
 		rep.mutatorStatistics.InvertNegatives++
 	case mutator.RemoveSelfAssignments:
 		rep.mutatorStatistics.RemoveSelfAssignments++
+	case mutator.Extra:
+		rep.mutatorStatistics.Extra++
 	}
 }
 
@@ -185,6 +191,7 @@ func (r *reportStatus) fileReport() {
 			MutantsNotViable:    r.notViable,
 			MutantsNotCovered:   r.notCovered,
 			MutantsUnclassified: r.unclassified,
+			MutantsPending:      r.pending,
 			ElapsedTime:         r.elapsed.Duration().Seconds(),
 			MutatorStatistics:   r.mutatorStatistics,
 			Files:               files,
@@ -223,10 +230,11 @@ func (r *reportStatus) fullRunReport() {
 	skipped := fgHiBlack(r.skipped)
 	notCovered := fgHiYellow(r.notCovered)
 	unclassified := fgRed(r.unclassified)
+	pending := fgHiYellow(r.pending)
 	log.Infoln("")
 	log.Infof("Mutation testing completed in %s\n", r.elapsed.String())
 	log.Infof("Killed: %s, Lived: %s, Not covered: %s\n", killed, lived, notCovered)
-	log.Infof("Timed out: %s, Not viable: %s, Skipped: %s, Unclassified: %s\n", timedOut, notViable, skipped, unclassified)
+	log.Infof("Timed out: %s, Not viable: %s, Skipped: %s, Unclassified: %s, Pending: %s\n", timedOut, notViable, skipped, unclassified, pending)
 	log.Infof("Test efficacy: %.2f%%\n", r.tEfficacy)
 	log.Infof("Mutator coverage: %.2f%%\n", r.mCovered)
 }

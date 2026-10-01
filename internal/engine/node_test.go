@@ -30,30 +30,33 @@ func TestNewTokenNode(t *testing.T) {
 		name      string
 		wantTok   token.Token
 		wantPos   token.Pos
+		wantStart token.Pos
 		supported bool
 	}{
 		{
 			name: "AssignStmt",
 			node: &ast.AssignStmt{
-				Lhs:    nil,
+				Lhs:    []ast.Expr{&ast.Ident{NamePos: 100}},
 				TokPos: 123,
 				Tok:    token.ADD_ASSIGN,
 				Rhs:    nil,
 			},
 			wantTok:   token.ADD_ASSIGN,
 			wantPos:   123,
+			wantStart: 100,
 			supported: true,
 		},
 		{
 			name: "BinaryExpr",
 			node: &ast.BinaryExpr{
-				X:     nil,
+				X:     &ast.Ident{NamePos: 100},
 				OpPos: 123,
 				Op:    token.ADD,
 				Y:     nil,
 			},
 			wantTok:   token.ADD,
 			wantPos:   123,
+			wantStart: 100,
 			supported: true,
 		},
 		{
@@ -64,17 +67,19 @@ func TestNewTokenNode(t *testing.T) {
 			},
 			wantTok:   token.CONTINUE,
 			wantPos:   123,
+			wantStart: 123,
 			supported: true,
 		},
 		{
 			name: "IncDecStmt",
 			node: &ast.IncDecStmt{
-				X:      nil,
+				X:      &ast.Ident{NamePos: 100},
 				TokPos: 123,
 				Tok:    token.INC,
 			},
 			wantTok:   token.INC,
 			wantPos:   123,
+			wantStart: 100,
 			supported: true,
 		},
 		{
@@ -86,6 +91,7 @@ func TestNewTokenNode(t *testing.T) {
 			},
 			wantTok:   token.ADD,
 			wantPos:   123,
+			wantStart: 123,
 			supported: true,
 		},
 		{
@@ -116,6 +122,9 @@ func TestNewTokenNode(t *testing.T) {
 			}
 			if gotPos != tc.wantPos {
 				t.Errorf("want %d, got %d", gotPos, tc.wantPos)
+			}
+			if tn.Start != tc.wantStart {
+				t.Errorf("start %d, want %d", tn.Start, tc.wantStart)
 			}
 		})
 	}

@@ -29,6 +29,7 @@ type OutputResult struct {
 	MutantsNotViable    int          `json:"mutants_not_viable"`
 	MutantsNotCovered   int          `json:"mutants_not_covered"`
 	MutantsUnclassified int          `json:"mutants_unclassified"`
+	MutantsPending      int          `json:"mutants_pending"`
 	ElapsedTime         float64      `json:"elapsed_time"`
 	MutatorStatistics   MutatorType  `json:"mutator_statistics"`
 }
@@ -60,4 +61,5 @@ type MutatorType struct {
 	InvertLoopCtrl           int `json:"invert_loop_ctrl,omitempty"`
 	InvertNegatives          int `json:"invert_negatives,omitempty"`
 	RemoveSelfAssignments    int `json:"remove_self_assignments,omitempty"`
+	Extra                    int `json:"extra,omitempty"`
 }

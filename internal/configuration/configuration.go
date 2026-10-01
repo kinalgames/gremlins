@@ -51,6 +51,7 @@ const (
 	UnleashSelectionConfirmKey   = "unleash.test-selection-confirm"
 	UnleashSettleLaterKey        = "unleash.settle-later"
 	UnleashSettleKey             = "unleash.settle"
+	UnleashExtraMutantsKey       = "unleash.extra-mutants"
 )
 
 const (

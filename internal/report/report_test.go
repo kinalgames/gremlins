@@ -52,6 +52,7 @@ func TestReport(t *testing.T) {
 	nrTestCases := []struct {
 		name    string
 		mutants []mutator.Mutator
+		pending int
 		want    string
 	}{
 		{
@@ -69,7 +70,7 @@ func TestReport(t *testing.T) {
 				// Limit the time reporting to the first two units (millis are excluded)
 				testingLine +
 				"Killed: 1, Lived: 1, Not covered: 1\n" +
-				"Timed out: 1, Not viable: 1, Skipped: 1, Unclassified: 1\n" +
+				"Timed out: 1, Not viable: 1, Skipped: 1, Unclassified: 1, Pending: 0\n" +
 				"Test efficacy: 33.33%\n" +
 				"Mutator coverage: 66.67%\n",
 		},
@@ -82,7 +83,7 @@ func TestReport(t *testing.T) {
 				// Limit the time reporting to the first two units (millis are excluded)
 				testingLine +
 				"Killed: 0, Lived: 0, Not covered: 1\n" +
-				"Timed out: 0, Not viable: 0, Skipped: 0, Unclassified: 0\n" +
+				"Timed out: 0, Not viable: 0, Skipped: 0, Unclassified: 0, Pending: 0\n" +
 				"Test efficacy: 0.00%\n" +
 				coverageLine,
 		},
@@ -96,7 +97,7 @@ func TestReport(t *testing.T) {
 				// Limit the time reporting to the first two units (millis are excluded)
 				testingLine +
 				"Killed: 0, Lived: 0, Not covered: 0\n" +
-				"Timed out: 2, Not viable: 0, Skipped: 0, Unclassified: 0\n" +
+				"Timed out: 2, Not viable: 0, Skipped: 0, Unclassified: 0, Pending: 0\n" +
 				"Test efficacy: 0.00%\n" +
 				coverageLine,
 		},
@@ -105,6 +106,17 @@ func TestReport(t *testing.T) {
 			mutants: []mutator.Mutator{},
 			want: "\n" +
 				"No results to report.\n",
+		},
+		{
+			name:    "reports the mutants left for a later run",
+			mutants: []mutator.Mutator{},
+			pending: 2,
+			want: "\n" +
+				testingLine +
+				"Killed: 0, Lived: 0, Not covered: 0\n" +
+				"Timed out: 0, Not viable: 0, Skipped: 0, Unclassified: 0, Pending: 2\n" +
+				"Test efficacy: 0.00%\n" +
+				coverageLine,
 		},
 	}
 	for _, tc := range nrTestCases {
@@ -116,6 +128,7 @@ func TestReport(t *testing.T) {
 			data := report.Results{
 				Mutants: tc.mutants,
 				Elapsed: (2 * time.Minute) + (22 * time.Second) + (123 * time.Millisecond),
+				Pending: tc.pending,
 			}
 
 			_ = report.Do(data)
@@ -348,11 +361,13 @@ func TestReportToFile(t *testing.T) {
 		stubMutant{status: mutator.Killed, mutantType: mutator.RemoveSelfAssignments, position: newPosition("file3.go", 4, 100)},
 		stubMutant{status: mutator.Unclassified, mutantType: mutator.ArithmeticBase, position: newPosition("file3.go", 5, 30)},
 		stubMutant{status: mutator.TimedOut, mutantType: mutator.ArithmeticBase, position: newPosition("file3.go", 6, 40)},
+		stubMutant{status: mutator.NotViable, mutantType: mutator.Extra, position: newPosition("file3.go", 7, 50)},
 	}
 	data := report.Results{
 		Module:  "example.com/go/module",
 		Mutants: mutants,
 		Elapsed: (2 * time.Minute) + (22 * time.Second) + (123 * time.Millisecond),
+		Pending: 2,
 	}
 	f, _ := os.ReadFile("testdata/normal_output.json")
 	want := internal.OutputResult{}

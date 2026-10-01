@@ -92,7 +92,7 @@ var classifyCases = []struct {
 }
 
 func eventsOf(lines string) *events {
-	ev := &events{pkg: "example.com/p", dir: mutatedAt, file: filepath.Join(mutatedAt, "p.go"), line: 6}
+	ev := &events{pkg: "example.com/p", dir: mutatedAt, file: filepath.Join(mutatedAt, "p.go"), first: 6, line: 6}
 	_, _ = ev.Write([]byte(lines))
 
 	return ev
@@ -102,6 +102,23 @@ func TestClassify(t *testing.T) {
 	for _, tc := range classifyCases {
 		if got := classify(tc.late, tc.code, eventsOf(tc.events)); got != tc.want {
 			t.Errorf("%s: %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// chainLines are the lines a compiler message about p.go may name, for a mutated token on line 6 of
+// an expression that starts on line 4, and whether it is the mutant's build failure.
+var chainLines = []struct {
+	line string
+	want bool
+}{{"3", false}, {"4", true}, {"5", true}, {"6", true}, {"7", false}, {"x", false}}
+
+func TestACompilerMessageOnAnyLineOfTheMutatedExpressionIsTheMutants(t *testing.T) {
+	for _, tc := range chainLines {
+		ev := &events{pkg: "example.com/p", dir: mutatedAt, file: filepath.Join(mutatedAt, "p.go"), first: 4, line: 6}
+		_, _ = ev.Write([]byte(compiled("example.com/p [example.com/p.test]", "./p.go", tc.line) + buildFail + failedBuild))
+		if got := classify(false, 1, ev) == unbuilt; got != tc.want {
+			t.Errorf("line %s: the mutant's %t, want %t", tc.line, got, tc.want)
 		}
 	}
 }

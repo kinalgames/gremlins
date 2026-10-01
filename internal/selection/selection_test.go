@@ -288,3 +288,23 @@ func TestADisabledPackageRunsEveryTest(t *testing.T) {
 		t.Errorf("heard %v", got)
 	}
 }
+
+func TestARestoredPackageRunsEveryTestWithoutReportingItAgain(t *testing.T) {
+	builder := &builderStub{indexes: map[string]selection.Index{pkgA: threeTests, pkgB: threeTests}}
+	h := &heard{}
+	s := selection.New(builder, 0, h.report)
+	s.Restore(pkgA)
+	if !s.Disabled(pkgA) || s.Disabled(pkgB) {
+		t.Fatal("Restore did not disable the package it names, or disabled another")
+	}
+	if got := builder.calls.Load(); got != 0 {
+		t.Fatalf("restoring indexed %d times", got)
+	}
+	if pattern := s.Pattern(pkgA, at(3)); pattern != "" {
+		t.Errorf("restored: %q", pattern)
+	}
+	s.Disable(pkgA, errors.New("disagreed"))
+	if got := h.all(); len(got) != 0 {
+		t.Errorf("heard %v, want nothing: the earlier run reported the package", got)
+	}
+}

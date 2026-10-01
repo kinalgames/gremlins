@@ -396,7 +396,7 @@ func (m *mutantExecutor) runSuite(rootDir, pkg, pattern string) outcome {
 	cmd.Env = append(cmd.Env, os.Environ()...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("GOTMPDIR=%s", m.wdDealer.WorkDir()))
 	pos := m.mutant.Position()
-	ev := &events{pkg: pkg, dir: cmd.Dir, file: filepath.Join(m.mutant.Workdir(), pos.Filename), line: pos.Line}
+	ev := &events{pkg: pkg, dir: cmd.Dir, file: filepath.Join(m.mutant.Workdir(), pos.Filename), first: firstLine(m.mutant), line: pos.Line}
 	cmd.Stdout = ev
 	killTree(cmd)
 	cmd.WaitDelay = waitDelay

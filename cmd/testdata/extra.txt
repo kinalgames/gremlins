@@ -1,0 +1,5 @@
+extra.go|// Limit is the largest size that fits.|// Limit is the largest size.
+extra.go|const Limit = 10|const Limit = 11
+extra.go|case n <= Limit:|case n < Limit:
+
+extra.go|return false|return false false

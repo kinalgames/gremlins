@@ -80,7 +80,8 @@ func (ms Status) String() string {
 // or `>=` in case of ConditionalsNegation.
 type Type int
 
-// The currently supported Type in Gremlins.
+// The currently supported Type in Gremlins. Extra is a mutant the user writes as a text
+// replacement (--extra-mutants) rather than one Gremlins finds in the code, so Types leaves it out.
 const (
 	ArithmeticBase Type = iota
 	ConditionalsBoundary
@@ -93,6 +94,7 @@ const (
 	InvertLoopCtrl
 	InvertNegatives
 	RemoveSelfAssignments
+	Extra
 )
 
 // Types allows to iterate over Type.
@@ -134,7 +136,8 @@ func (mt Type) String() string {
 		return "INVERT_BWASSIGN"
 	case RemoveSelfAssignments:
 		return "REMOVE_SELF_ASSIGNMENTS"
-
+	case Extra:
+		return "EXTRA"
 	default:
 		panic("this should not happen")
 	}

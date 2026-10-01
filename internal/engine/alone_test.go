@@ -112,6 +112,13 @@ func (s *sequence) all() [][]string {
 // asked for; fail, when set, makes the work directory of that name fail.
 func aloneDealer(t *testing.T, seq *sequence, fail string, opts ...engine.ExecutorDealerOption) (*engine.MutantExecutorDealer, *[]string) {
 	t.Helper()
+
+	return aloneDealerIn(t, t.TempDir(), seq, fail, opts...)
+}
+
+// aloneDealerIn is aloneDealer for the module whose source is in root.
+func aloneDealerIn(t *testing.T, root string, seq *sequence, fail string, opts ...engine.ExecutorDealerOption) (*engine.MutantExecutorDealer, *[]string) {
+	t.Helper()
 	var dirs []string
 	wdd := &dealerStub{t: t, fnGet: func(name string) (string, error) {
 		dirs = append(dirs, name)
@@ -121,7 +128,7 @@ func aloneDealer(t *testing.T, seq *sequence, fail string, opts ...engine.Execut
 
 		return t.TempDir(), nil
 	}}
-	mod := gomodule.GoModule{Name: expectedModule, Root: t.TempDir(), CallingDir: "."}
+	mod := gomodule.GoModule{Name: expectedModule, Root: root, CallingDir: "."}
 
 	return engine.NewExecutorDealer(mod, tempDealer{wdd}, aloneElapsed, append([]engine.ExecutorDealerOption{engine.WithExecContext(seq.exec)}, opts...)...), &dirs
 }

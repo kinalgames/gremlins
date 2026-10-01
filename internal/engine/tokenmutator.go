@@ -85,6 +85,12 @@ func (m *TokenMutator) Position() token.Position {
 	return m.fs.Position(m.tokenNode.TokPos)
 }
 
+// FirstLine is the line where the mutated expression or statement starts, which the compiler names
+// for an error the mutated token causes in a left operand on an earlier line.
+func (m *TokenMutator) FirstLine() int {
+	return m.fs.Position(m.tokenNode.Start).Line
+}
+
 // Pos returns the token.Pos where the TokenMutator resides.
 func (m *TokenMutator) Pos() token.Pos {
 	return m.tokenNode.TokPos

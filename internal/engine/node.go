@@ -26,6 +26,10 @@ import (
 type NodeToken struct {
 	tok    *token.Token
 	TokPos token.Pos
+	// Start is where the mutated expression or statement starts: its left operand, for a binary
+	// expression, an assignment or an increment, where the compiler reports an error the mutated
+	// token causes.
+	Start token.Pos
 }
 
 // NewTokenNode checks if the ast.Node implementation is supported by
@@ -58,6 +62,7 @@ func NewTokenNode(n ast.Node) (*NodeToken, bool) {
 	return &NodeToken{
 		tok:    tok,
 		TokPos: pos,
+		Start:  n.Pos(),
 	}, true
 }
 

@@ -194,6 +194,12 @@ func (s *Selector) Disabled(pkg string) bool {
 	return s.entry(pkg).disabled.Load()
 }
 
+// Restore makes every later mutant of pkg run every test, as an earlier run that disabled pkg
+// already reported. It does not index the package.
+func (s *Selector) Restore(pkg string) {
+	s.entry(pkg).disabled.Store(true)
+}
+
 // Disable makes every later mutant of pkg run every test, for the reason err. It does not index
 // the package.
 func (s *Selector) Disable(pkg string, err error) {

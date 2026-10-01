@@ -137,6 +137,11 @@ func TestTypeString(t *testing.T) {
 			expected:   "REMOVE_SELF_ASSIGNMENTS",
 			mutantType: mutator.RemoveSelfAssignments,
 		},
+		{
+			name:       "EXTRA",
+			expected:   "EXTRA",
+			mutantType: mutator.Extra,
+		},
 	}
 	for _, tc := range testCases {
 		tc := tc

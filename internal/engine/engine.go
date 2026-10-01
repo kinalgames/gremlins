@@ -53,6 +53,7 @@ type Engine struct {
 	mutantStream chan mutator.Mutator
 	module       gomodule.GoModule
 	logger       report.MutantLogger
+	extras       []mutator.Mutator
 }
 
 // CodeData is used to check if the mutant should be executed.
@@ -94,6 +95,16 @@ func WithDirFs(dirFS fs.FS) Option {
 	}
 }
 
+// WithExtraMutants adds the mutants the user wrote (ReadExtraMutants) to those the engine finds.
+// They run whatever the coverage, the diff and the file exclusions say: the user chose them.
+func WithExtraMutants(muts []mutator.Mutator) Option {
+	return func(m Engine) Engine {
+		m.extras = muts
+
+		return m
+	}
+}
+
 // Run executes the mutation testing.
 //
 // It walks the fs.FS provided and checks every .go file which is not a test.
@@ -111,6 +122,9 @@ func (mu *Engine) Run(ctx context.Context) report.Results {
 
 			return nil
 		})
+		for _, m := range mu.extras {
+			mu.mutantStream <- m
+		}
 	}()
 
 	start := time.Now()
@@ -144,7 +158,7 @@ func (mu *Engine) findMutations(fileName string, set *token.FileSet, file *ast.F
 		return
 	}
 
-	pkg := mu.pkgName(fileName)
+	pkg := packageOf(mu.module, fileName)
 	for _, mt := range mutantTypes {
 		if !configuration.Get[bool](configuration.MutantTypeEnabledKey(mt)) {
 			continue
@@ -158,19 +172,19 @@ func (mu *Engine) findMutations(fileName string, set *token.FileSet, file *ast.F
 	}
 }
 
-// pkgName is the import path of the package fileName (relative to the calling directory)
-// belongs to: the module name plus the file's directory relative to the module root. The
-// package clause is not consulted, because an import path never depends on the package name:
-// walking up the directories for one ending in the package name sent every `package main`
-// (and every package named unlike its directory) to the module root, whose tests then ran in
-// place of the mutated package's and reported each mutant as killed.
-func (mu *Engine) pkgName(fileName string) string {
-	dir := filepath.Dir(filepath.Join(mu.module.CallingDir, fileName))
+// packageOf is the import path of the package fileName (relative to mod's calling directory)
+// belongs to: the module name plus the file's directory relative to the module root. The package
+// clause is not consulted, because an import path never depends on the package name: walking up
+// the directories for one ending in the package name sent every `package main` (and every package
+// named unlike its directory) to the module root, whose tests then ran in place of the mutated
+// package's and reported each mutant as killed.
+func packageOf(mod gomodule.GoModule, fileName string) string {
+	dir := filepath.Dir(filepath.Join(mod.CallingDir, fileName))
 	if dir == "." {
-		return mu.module.Name
+		return mod.Name
 	}
 
-	return normalisePkgPath(mu.module.Name + "/" + dir)
+	return normalisePkgPath(mod.Name + "/" + dir)
 }
 
 func normalisePkgPath(pkg string) string {
@@ -239,8 +253,14 @@ func (mu *Engine) executeTests(ctx context.Context) report.Results {
 		mu.logger.Mutant(m)
 		mutants = append(mutants, m)
 	}
-	if len(pending) == 0 || mu.deferSettle(pending) {
+	if len(pending) == 0 {
 		return results(mutants)
+	}
+	if mu.deferSettle(pending) {
+		res := results(mutants)
+		res.Pending = len(pending)
+
+		return res
 	}
 	settler.Settle(ctx, pending)
 	for _, m := range pending {
@@ -250,27 +270,39 @@ func (mu *Engine) executeTests(ctx context.Context) report.Results {
 	return results(append(mutants, pending...))
 }
 
-// Deferrer is a Settler that can hand its pending mutants to a later run (Deferred).
+// Deferrer is a Settler that can hand its pending mutants to a later run (Deferred), or answers
+// why it cannot.
 type Deferrer interface {
-	Defer(pending []mutator.Mutator) Deferred
+	Defer(pending []mutator.Mutator) (Deferred, error)
 }
 
 // deferSettle writes the pending mutants to the file --settle-later names, for a later run with
 // --settle to give them their verdicts, and reports whether it did: they are then left out of
 // this run's results. Without the setting, or when the file cannot be written, this run settles
-// them.
+// them, and no file is left at the path.
 func (mu *Engine) deferSettle(pending []mutator.Mutator) bool {
 	path := configuration.Get[string](configuration.UnleashSettleLaterKey)
 	deferrer, ok := mu.jDealer.(Deferrer)
 	if path == "" || !ok {
 		return false
 	}
-	if err := WriteDeferred(path, deferrer.Defer(pending)); err != nil {
+	d, err := deferrer.Defer(pending)
+	if err == nil {
+		err = WriteDeferred(path, d)
+	}
+	if err != nil {
 		log.Errorf("failed to defer the runs alone to %s, so they run now\n\t%v\n", path, err)
+		if err := RemoveDeferred(path); err != nil {
+			log.Errorf("failed to remove %s, which a later run must not settle\n\t%v\n", path, err)
+		}
 
 		return false
 	}
-	log.Infof("%d mutants wait to run alone: gremlins unleash --settle %s\n", len(pending), path)
+	if len(pending) == 1 {
+		log.Infof("1 mutant waits to run alone: gremlins unleash --settle %s\n", path)
+	} else {
+		log.Infof("%d mutants wait to run alone: gremlins unleash --settle %s\n", len(pending), path)
+	}
 
 	return true
 }

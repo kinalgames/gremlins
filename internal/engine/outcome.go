@@ -52,6 +52,21 @@ var statuses = [...]mutator.Status{
 	broken:   mutator.Unclassified,
 }
 
+// outcomeNames describe how a run ended.
+var outcomeNames = [...]string{
+	passed:   "passed",
+	failed:   "failed a test",
+	unbuilt:  "did not build",
+	timedOut: "timed out",
+	crashed:  "crashed",
+	broken:   "reached no verdict",
+}
+
+// String describes how a run ended.
+func (o outcome) String() string {
+	return outcomeNames[o]
+}
+
 // status is the verdict of a mutant whose run ended so.
 func (o outcome) status() mutator.Status {
 	return statuses[o]
@@ -132,11 +147,12 @@ func classify(late bool, code int, ev *events) outcome {
 }
 
 // events reads the events go test -json writes for the package pkg, line by line as they come, and
-// keeps what classify needs. file and line are the mutated position, file an absolute path; dir
-// is the directory the go command runs in, which the compiler names files from.
+// keeps what classify needs. file is the mutated file, an absolute path, and first and line the
+// lines of the mutated expression, from where it starts to the mutated token; dir is the directory
+// the go command runs in, which the compiler names files from.
 type events struct {
 	pkg, dir, file string
-	line           int
+	first, line    int
 
 	pending       []byte // the line being read
 	buildFailed   bool   // a package failed to build
@@ -191,14 +207,16 @@ func (e *events) ownPackage(importPath string) bool {
 }
 
 // namesMutatedLine reports whether a compiler message, "<file>:<line>:<column>: <text>" with the
-// file named from the go command's directory, is about the mutated line.
+// file named from the go command's directory, is about a line of the mutated expression. The
+// unmutated package built, so no other error can name a line of the mutated file.
 func (e *events) namesMutatedLine(message string) bool {
 	name, rest, found := strings.Cut(message, ".go:")
 	if !found {
 		return false
 	}
-	line, _, found := strings.Cut(rest, ":")
-	if !found || line != strconv.Itoa(e.line) {
+	digits, _, found := strings.Cut(rest, ":")
+	line, err := strconv.Atoi(digits)
+	if !found || err != nil || line < e.first || line > e.line {
 		return false
 	}
 	file := name + ".go"
@@ -207,4 +225,14 @@ func (e *events) namesMutatedLine(message string) bool {
 	}
 
 	return filepath.Clean(file) == filepath.Clean(e.file)
+}
+
+// firstLine is the line where mut's mutated expression starts, when mut knows it (TokenMutator),
+// else the line of its position.
+func firstLine(mut mutator.Mutator) int {
+	if m, ok := mut.(interface{ FirstLine() int }); ok {
+		return m.FirstLine()
+	}
+
+	return mut.Position().Line
 }

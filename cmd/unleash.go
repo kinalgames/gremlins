@@ -64,6 +64,7 @@ const (
 	paramSelectionConfirm   = "test-selection-confirm"
 	paramSettleLater        = "settle-later"
 	paramSettle             = "settle"
+	paramExtraMutants       = "extra-mutants"
 
 	// Thresholds.
 	paramThresholdEfficacy  = "threshold-efficacy"
@@ -167,6 +168,15 @@ func run(ctx context.Context, mod gomodule.GoModule, workDir string) (report.Res
 	if path := configuration.Get[string](configuration.UnleashSettleKey); path != "" {
 		return settle(ctx, mod, workDir, path)
 	}
+	if later := configuration.Get[string](configuration.UnleashSettleLaterKey); later != "" {
+		if err := engine.RemoveDeferred(later); err != nil {
+			return report.Results{}, fmt.Errorf("failed to remove the deferred runs of an earlier run: %w", err)
+		}
+	}
+	extras, err := extraMutants(mod)
+	if err != nil {
+		return report.Results{}, err
+	}
 	fDiff, err := diff.New(mod.Root)
 	if err != nil {
 		return report.Results{}, err
@@ -195,10 +205,24 @@ func run(ctx context.Context, mod gomodule.GoModule, workDir string) (report.Res
 		Exclusion: exclude,
 	}
 
-	mut := engine.New(mod, codeData, jDealer)
+	mut := engine.New(mod, codeData, jDealer, engine.WithExtraMutants(extras))
 	results := mut.Run(ctx)
 
 	return results, nil
+}
+
+// extraMutants are the mutants the file --extra-mutants names lists, none without the setting.
+func extraMutants(mod gomodule.GoModule) ([]mutator.Mutator, error) {
+	path := configuration.Get[string](configuration.UnleashExtraMutantsKey)
+	if path == "" {
+		return nil, nil
+	}
+	muts, err := engine.ReadExtraMutants(path, mod)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read the extra mutants: %w", err)
+	}
+
+	return muts, nil
 }
 
 // settle gives the mutants a run with --settle-later wrote to the file path their verdicts, each
@@ -253,6 +277,7 @@ func setFlagsOnCmd(cmd *cobra.Command) error {
 		{Name: paramSelectionConfirm, CfgKey: configuration.UnleashSelectionConfirmKey, DefaultV: 5, Usage: "with --test-selection, the percentage of a package's subset kills confirmed with every test, besides its first"},
 		{Name: paramSettleLater, CfgKey: configuration.UnleashSettleLaterKey, DefaultV: "", Usage: "write the mutants that must run again alone to this file, for a later run with --settle, and leave them out of this run's results"},
 		{Name: paramSettle, CfgKey: configuration.UnleashSettleKey, DefaultV: "", Usage: "run alone, one at a time, only the mutants a run with --settle-later wrote to this file, and report their verdicts"},
+		{Name: paramExtraMutants, CfgKey: configuration.UnleashExtraMutantsKey, DefaultV: "", Usage: "also run the mutants this file lists, one per line, file|original|mutated: in the file, named from the package's directory, the only occurrence of original becomes mutated"},
 	}
 
 	for _, f := range fls {

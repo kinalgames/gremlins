@@ -80,6 +80,30 @@ You can provide a few rules. File is skipped if matches any regexp.
 gremlins unleash -E "_(gen|wrap).go$" -E "^(generate|wrap)/" -E "internal/super_old/"
 ```
 
+### Extra mutants
+
+:material-flag: `--extra-mutants` · :material-sign-direction: Default: none
+
+Adds mutants you write to those Gremlins finds: a mutation Gremlins cannot make, or one whose
+position its coverage cannot see, such as the condition of a `case` in a tagless switch or a
+package-level constant. The file lists one per line, `file|original|mutated`: in the file, named
+from the directory Gremlins runs on, the only occurrence of `original` becomes `mutated`. An
+empty line is skipped; `mutated` may hold `|`, `original` may not.
+
+```text
+limits.go|const Limit = 10|const Limit = 11
+limits.go|case n <= Limit:|case n < Limit:
+```
+
+```shell
+gremlins unleash --extra-mutants mutants.txt ./pkg
+```
+
+Each is an `EXTRA` mutant: it runs with its package's tests, under the same verdicts, runs
+alone and settles later as every other mutant does. It runs whatever the coverage, the diff and
+the excluded files say, since the list chose it. A line of another shape, or an `original` that
+does not occur exactly once in its file, fails the run before any test runs.
+
 ### Diff
 
 :material-flag: `--diff`/`-D` · :material-sign-direction: Default: empty
@@ -284,6 +308,9 @@ The output file in JSON format and has the following structure:
   "mutants_not_viable": 2,
   //(3)
   "mutants_not_covered": 10,
+  "mutants_unclassified": 0,
+  "mutants_pending": 0,
+  //(5)
   "elapsed_time": 123.456,
   //(4)
   "files": [
@@ -308,6 +335,8 @@ The output file in JSON format and has the following structure:
 2. This is a percentage expressed as floating point number.
 3. NOT VIABLE mutants are excluded from all the calculations.
 4. The elapsed time is expressed in seconds, expressed as floating point number.
+5. Pending mutants are those a run with `--settle-later` left for a later run; they are not in the
+   other counts.
 
 [//]: # (@formatter:off)
 !!! warning
@@ -332,18 +361,25 @@ A mutant that timed out or crashed, and a kill by selected tests that waits for 
 runs again alone once every other mutant has run, so that the load of the other runs does not
 decide its verdict. When several Gremlins runs share a machine, alone means alone on the
 machine: with `--settle-later <file>`, Gremlins writes those mutants to the file instead of
-running them, and leaves them out of its results. A later run with `--settle <file>` on the same
-path, once no other run loads the machine, runs each of them alone, one at a time, with the time
-the first run gave its mutants, and reports their verdicts. Without pending mutants, no file is
-written.
+running them, and leaves them out of its results, whose summary counts them as pending. A later
+run with `--settle <file>` on the same path, once no other run loads the machine, runs each of
+them alone, one at a time, with the time the first run gave its mutants, and reports their
+verdicts.
 
 ```shell
 gremlins unleash --settle-later=pending.json ./pkg
 gremlins unleash --settle=pending.json ./pkg
 ```
 
-The run with `--settle` gathers no coverage and runs no other mutant; give it the first run's
-other settings.
+The run with `--settle` gathers no coverage and runs no other mutant. Give it the first run's
+other settings: the file records the package path, the tags, the integration mode, the test CPU
+and the cover packages, and the SHA-256 of each mutated file, and the run refuses the file,
+before any test runs, when one of them differs, since a mutant is found again by its position.
+
+A run with `--settle-later` removes the file at that path when it starts, and writes the new one
+to a temporary file it renames, so the path holds a whole file of this run or none: without
+pending mutants, or when the file cannot be written (the run then settles them itself), no file
+is left there.
 
 ### Tags
 
