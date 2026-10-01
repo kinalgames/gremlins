@@ -379,9 +379,21 @@ gremlins unleash --settle=pending.json ./pkg
 ```
 
 The run with `--settle` gathers no coverage and runs no other mutant. Give it the first run's
-other settings: the file records the package path, the tags, the integration mode, the test CPU
-and the cover packages, and the SHA-256 of each mutated file, and the run refuses the file,
-before any test runs, when one of them differs, since a mutant is found again by its position.
+settings and tree; the file records what the run checks, and the run refuses the file, before
+any test runs, when one of them differs:
+
+- the settings: the package path, the tags, the integration mode, the test CPU and the cover
+  packages;
+- the toolchain, as `go env` answers it in the package's directory: `GOVERSION`, `GOOS`,
+  `GOARCH` and `GOFLAGS`;
+- the SHA-256 of every file in the directory of each pending mutant's package and in the
+  directories below it (sources, tests, `testdata`, embedded files), save a directory whose name
+  starts with `.` or `_` and a nested module; a file changed, gone or new is refused;
+- the SHA-256 of the module's `go.mod` and `go.sum`.
+
+The check covers no other package the tests link outside those directories, no environment
+variable but `GOFLAGS` (`GOEXPERIMENT`, `CGO_ENABLED`, the tests' own), and nothing outside the
+module, such as the module cache.
 
 A run with `--settle-later` removes the file at that path when it starts, and writes the new one
 to a temporary file it renames, so the path holds a whole file of this run or none: without

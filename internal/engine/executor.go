@@ -67,6 +67,7 @@ type MutantExecutorDealer struct {
 	dryRun            bool
 	integrationMode   bool
 	testCPU           int
+	toolchain         Toolchain
 }
 
 // ExecutorDealerOption is the defining option for the initialisation of a ExecutorDealer.

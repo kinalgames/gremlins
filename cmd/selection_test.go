@@ -141,7 +141,7 @@ func TestTestSelectionKeepsTheWholeSuitesVerdicts(t *testing.T) {
 		t.Skip("runs gremlins with the go command")
 	}
 	t.Setenv("GOWORK", "off")
-	t.Setenv("GOFLAGS", "-mod=mod")
+	t.Setenv("GOFLAGS", modMod)
 	fixtures, err := filepath.Abs(filepath.Join("..", "internal", "selection", "testdata"))
 	if err != nil {
 		t.Fatal(err)
@@ -209,6 +209,9 @@ var verdictCases = []struct {
 // times, which makes the run alone a time-out, so no repeat, and the mutant UNCLASSIFIED.
 var ample = map[string]any{configuration.UnleashTimeoutCoefficientKey: 30}
 
+// modMod is the GOFLAGS of the fixtures' runs: their modules have no go.sum.
+const modMod = "-mod=mod"
+
 // extraList is the list of the extra fixture's extra mutants, by its absolute path: the runs
 // change the working directory.
 var extraList, _ = filepath.Abs(filepath.Join("testdata", "extra.txt"))
@@ -218,7 +221,7 @@ func TestEachMutantsVerdictRestsOnItsOwnCode(t *testing.T) {
 		t.Skip("runs gremlins with the go command")
 	}
 	t.Setenv("GOWORK", "off")
-	t.Setenv("GOFLAGS", "-mod=mod")
+	t.Setenv("GOFLAGS", modMod)
 	for _, tc := range verdictCases {
 		t.Run(tc.fixture, func(t *testing.T) {
 			got, logged := unleash(t, filepath.Join("testdata", tc.fixture), tc.pkg, tc.settings, tc.beside)
@@ -237,7 +240,7 @@ func TestARunThatDefersItsRunsAloneLeavesTheVerdictsToTheRunThatSettlesThem(t *t
 		t.Skip("runs gremlins with the go command")
 	}
 	t.Setenv("GOWORK", "off")
-	t.Setenv("GOFLAGS", "-mod=mod")
+	t.Setenv("GOFLAGS", modMod)
 	for _, tc := range verdictCases {
 		if !slices.Contains(deferredCases, tc.fixture) {
 			continue
@@ -292,7 +295,7 @@ func TestASettlingRunRefusesATreeThatChanged(t *testing.T) {
 		t.Skip("runs gremlins with the go command")
 	}
 	t.Setenv("GOWORK", "off")
-	t.Setenv("GOFLAGS", "-mod=mod")
+	t.Setenv("GOFLAGS", modMod)
 	t.Setenv("SWAP_MARKER", filepath.Join(t.TempDir(), "crashed"))
 	dir := filepath.Join("testdata", "swap")
 	path := filepath.Join(t.TempDir(), "deferred.json")
@@ -315,12 +318,71 @@ func TestASettlingRunRefusesATreeThatChanged(t *testing.T) {
 	}
 }
 
+// testedited is cmd/testdata/testedit/testedit_test.go with a test that kills A's mutant.
+const testedited = "package testedit\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\n" +
+	"func TestMain(m *testing.M) {\n\tif marker := os.Getenv(\"TESTEDIT_MARKER\"); marker != \"\" && A(1) != 2 {\n" +
+	"\t\tif _, err := os.Stat(marker); err != nil {\n\t\t\t_ = os.WriteFile(marker, nil, 0o600)\n\t\t\tos.Exit(3)\n\t\t}\n\t}\n" +
+	"\tos.Exit(m.Run())\n}\n\nfunc TestA(t *testing.T) {\n\tif A(1) != 2 {\n\t\tt.Fatal(\"A(1) must be 2\")\n\t}\n}\n"
+
+// testeditRefusals are changes to cmd/testdata/testedit after a run deferred A's mutant (a file
+// written beside the deferring run's tree, GOFLAGS), each with the start of the settling run's
+// refusal.
+var testeditRefusals = []struct {
+	name    string
+	beside  map[string]string
+	goflags string
+	want    string
+}{
+	{"a test that kills the mutant", map[string]string{"testedit/testedit_test.go": testedited}, modMod, "testedit_test.go changed since"},
+	{"a new testdata file", map[string]string{"testedit/testdata/in.txt": "x"}, modMod, "testdata/in.txt is new since"},
+	{"go.mod", map[string]string{"testedit/go.mod": "module example.com/testedit\n\ngo 1.25\n"}, modMod, "go.mod changed since"},
+	{"other GOFLAGS", nil, "-mod=mod -count=1", "the run that deferred the mutants had the settings"},
+}
+
+func TestASettlingRunRefusesAnEditOfTheTestsOrTheToolchain(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs gremlins with the go command")
+	}
+	t.Setenv("GOWORK", "off")
+	t.Setenv("GOFLAGS", modMod)
+	t.Setenv("TESTEDIT_MARKER", filepath.Join(t.TempDir(), "crashed"))
+	dir := filepath.Join("testdata", "testedit")
+	path := filepath.Join(t.TempDir(), "deferred.json")
+	if first, logged := unleash(t, dir, "", map[string]any{configuration.UnleashSettleLaterKey: path, configuration.UnleashTimeoutCoefficientKey: 30}, nil); len(first) != 0 {
+		t.Fatalf("the deferring run reported %v; logged %s", first, logged)
+	}
+	settings := map[string]any{configuration.UnleashSettleKey: path}
+	for _, tc := range testeditRefusals {
+		t.Setenv("GOFLAGS", tc.goflags)
+		if got, logged, err := unleashed(t, dir, "", settings, tc.beside); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: settled %v: %v; logged %s", tc.name, got, err, logged)
+		}
+	}
+	t.Setenv("GOFLAGS", modMod)
+	if got, logged := unleash(t, dir, "", settings, nil); !maps.Equal(got, map[string]mutator.Status{"testedit.go:6 ARITHMETIC_BASE": mutator.Lived}) {
+		t.Fatalf("settled %v in the tree that deferred it; logged %s", got, logged)
+	}
+}
+
+func TestARunFailsWithoutTheToolchainASettlementNeeds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deferred.json")
+	if err := engine.WriteDeferred(path, engine.Deferred{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	for _, key := range []string{configuration.UnleashSettleKey, configuration.UnleashSettleLaterKey} {
+		if _, _, err := unleashed(t, filepath.Join("testdata", "unbuilt"), "", map[string]any{key: path}, nil); err == nil || !strings.Contains(err.Error(), "failed to read the toolchain") {
+			t.Errorf("%s: %v, want the go command's failure", key, err)
+		}
+	}
+}
+
 func TestARunWithSettleLaterLeavesNoFileOfAnEarlierRun(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs gremlins with the go command")
 	}
 	t.Setenv("GOWORK", "off")
-	t.Setenv("GOFLAGS", "-mod=mod")
+	t.Setenv("GOFLAGS", modMod)
 	path := filepath.Join(t.TempDir(), "deferred.json")
 	if err := os.WriteFile(path, []byte("an earlier run's"), 0o600); err != nil {
 		t.Fatal(err)

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -168,10 +169,9 @@ func run(ctx context.Context, mod gomodule.GoModule, workDir string) (report.Res
 	if path := configuration.Get[string](configuration.UnleashSettleKey); path != "" {
 		return settle(ctx, mod, workDir, path)
 	}
-	if later := configuration.Get[string](configuration.UnleashSettleLaterKey); later != "" {
-		if err := engine.RemoveDeferred(later); err != nil {
-			return report.Results{}, fmt.Errorf("failed to remove the deferred runs of an earlier run: %w", err)
-		}
+	opts, err := settleLater(ctx, mod)
+	if err != nil {
+		return report.Results{}, err
 	}
 	extras, err := extraMutants(mod)
 	if err != nil {
@@ -197,7 +197,7 @@ func run(ctx context.Context, mod gomodule.GoModule, workDir string) (report.Res
 	wdDealer := workdir.NewCachedDealer(workDir, mod.Root)
 	defer wdDealer.Clean()
 
-	jDealer := engine.NewExecutorDealer(mod, wdDealer, cProfile.Elapsed)
+	jDealer := engine.NewExecutorDealer(mod, wdDealer, cProfile.Elapsed, opts...)
 
 	codeData := engine.CodeData{
 		Cov:       cProfile.Profile,
@@ -209,6 +209,36 @@ func run(ctx context.Context, mod gomodule.GoModule, workDir string) (report.Res
 	results := mut.Run(ctx)
 
 	return results, nil
+}
+
+// settleLater prepares a run with --settle-later: it removes what an earlier run left at the
+// setting's path, and answers the dealer options that record what a later run settles with (the
+// toolchain). A run without the setting needs neither.
+func settleLater(ctx context.Context, mod gomodule.GoModule) ([]engine.ExecutorDealerOption, error) {
+	later := configuration.Get[string](configuration.UnleashSettleLaterKey)
+	if later == "" {
+		return nil, nil
+	}
+	if err := engine.RemoveDeferred(later); err != nil {
+		return nil, fmt.Errorf("failed to remove the deferred runs of an earlier run: %w", err)
+	}
+	tc, err := readToolchain(ctx, mod)
+	if err != nil {
+		return nil, err
+	}
+
+	return []engine.ExecutorDealerOption{engine.WithToolchain(tc)}, nil
+}
+
+// readToolchain is the toolchain the go command answers in the run's calling directory, where
+// the mutants' tests run.
+func readToolchain(ctx context.Context, mod gomodule.GoModule) (engine.Toolchain, error) {
+	tc, err := engine.ReadToolchain(ctx, filepath.Join(mod.Root, mod.CallingDir))
+	if err != nil {
+		return engine.Toolchain{}, fmt.Errorf("failed to read the toolchain: %w", err)
+	}
+
+	return tc, nil
 }
 
 // extraMutants are the mutants the file --extra-mutants names lists, none without the setting.
@@ -232,10 +262,14 @@ func settle(ctx context.Context, mod gomodule.GoModule, workDir, path string) (r
 	if err != nil {
 		return report.Results{}, fmt.Errorf("failed to read the deferred runs: %w", err)
 	}
+	tc, err := readToolchain(ctx, mod)
+	if err != nil {
+		return report.Results{}, err
+	}
 	wdDealer := workdir.NewCachedDealer(workDir, mod.Root)
 	defer wdDealer.Clean()
 	start := time.Now()
-	muts, err := engine.NewExecutorDealer(mod, wdDealer, 0).Resume(ctx, d)
+	muts, err := engine.NewExecutorDealer(mod, wdDealer, 0, engine.WithToolchain(tc)).Resume(ctx, d)
 	if err != nil {
 		return report.Results{}, fmt.Errorf("failed to settle the deferred runs: %w", err)
 	}

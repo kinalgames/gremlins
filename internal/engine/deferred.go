@@ -39,8 +39,8 @@ import (
 
 // Deferred is what a run hands to a later run that settles its pending mutants (Settler) once
 // nothing else runs on the machine, as when several gremlins runs share it: the time each
-// mutant's tests get, the settings that change a verdict, each mutated file with its digest, the
-// packages whose test selection was disabled, and each pending mutant.
+// mutant's tests get, the settings that change a verdict, the files its verdicts can rest on with
+// their digests (tree), the packages whose test selection was disabled, and each pending mutant.
 type Deferred struct {
 	Timeout  time.Duration    `json:"timeout"`
 	Settings Settings         `json:"settings"`
@@ -51,18 +51,20 @@ type Deferred struct {
 
 // Settings are the settings of a run that change a mutant's verdict: the package directory the
 // run was given (the calling directory, from the module root), the build tags, the integration
-// mode, the -cpu of the tests and the coverage packages. A run settles another's mutants only
-// with the same settings.
+// mode, the -cpu of the tests, the coverage packages and the toolchain. A run settles another's
+// mutants only with the same settings.
 type Settings struct {
-	Package     string `json:"package"`
-	Tags        string `json:"tags,omitempty"`
-	Integration bool   `json:"integration,omitempty"`
-	TestCPU     int    `json:"test_cpu,omitempty"`
-	CoverPkg    string `json:"coverpkg,omitempty"`
+	Package     string    `json:"package"`
+	Tags        string    `json:"tags,omitempty"`
+	Integration bool      `json:"integration,omitempty"`
+	TestCPU     int       `json:"test_cpu,omitempty"`
+	CoverPkg    string    `json:"coverpkg,omitempty"`
+	Toolchain   Toolchain `json:"toolchain"`
 }
 
-// DeferredFile is a file of a pending mutant, named from the module root, with the hex SHA-256 of
-// its content when the run deferred the mutant. A run settles the mutant only in the same content.
+// DeferredFile is a file a pending mutant's verdict can rest on, named from the module root, with
+// the hex SHA-256 of its content when the run deferred the mutant. A run settles the mutant only
+// in the same files with the same content.
 type DeferredFile struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`
@@ -70,9 +72,9 @@ type DeferredFile struct {
 
 // DeferredMutant is a pending mutant: its position (the file named from the calling directory),
 // its type and package; for a mutator.Extra, the text it replaces, the text it puts in its place
-// and the line of the list that wrote it; First, for a mutant that runs again alone, how its first run ended; Kill for a subset
-// kill the whole suite has not confirmed, and Confirm for one Settle confirms before any other
-// mutant.
+// and the line of the list that wrote it; First, for a mutant that runs again alone, how its first
+// run ended; Kill for a subset kill the whole suite has not confirmed, and Confirm for one Settle
+// confirms before any other mutant.
 type DeferredMutant struct {
 	File     string `json:"file"`
 	Line     int    `json:"line"`
@@ -88,7 +90,7 @@ type DeferredMutant struct {
 }
 
 // Defer is the state Settle would need to settle pending, all of them pending (Pending), or an
-// error when a mutated file cannot be read for its digest.
+// error when a file of their packages cannot be read for its digest.
 func (m MutantExecutorDealer) Defer(pending []mutator.Mutator) (Deferred, error) {
 	confirm := m.unsettled.confirmations()
 	pending = slices.Clone(pending)
@@ -107,16 +109,12 @@ func (m MutantExecutorDealer) Defer(pending []mutator.Mutator) (Deferred, error)
 		if killed && m.selector != nil && m.selector.Disabled(k.pkg) && !slices.Contains(d.Disabled, k.pkg) {
 			d.Disabled = append(d.Disabled, k.pkg)
 		}
-		path := m.fromRoot(dm.File)
-		if slices.ContainsFunc(d.Files, func(f DeferredFile) bool { return f.Path == path }) {
-			continue
-		}
-		src, err := m.source(path)
-		if err != nil {
-			return Deferred{}, err
-		}
-		d.Files = append(d.Files, DeferredFile{Path: path, SHA256: digest(src)})
 	}
+	files, err := m.tree(m.mutantDirs(d.Mutants))
+	if err != nil {
+		return Deferred{}, err
+	}
+	d.Files = deferredFiles(files)
 
 	return d, nil
 }
@@ -136,18 +134,13 @@ func deferredMutant(mut mutator.Mutator) DeferredMutant {
 func (m MutantExecutorDealer) settings() Settings {
 	return Settings{
 		Package: filepath.ToSlash(m.mod.CallingDir), Tags: m.buildTags, Integration: m.integrationMode, TestCPU: m.testCPU,
-		CoverPkg: configuration.Get[string](configuration.UnleashCoverPkgKey),
+		CoverPkg: configuration.Get[string](configuration.UnleashCoverPkgKey), Toolchain: m.toolchain,
 	}
 }
 
 // fromRoot names file, named from the calling directory, from the module root.
 func (m MutantExecutorDealer) fromRoot(file string) string {
 	return filepath.ToSlash(filepath.Join(m.mod.CallingDir, filepath.FromSlash(file)))
-}
-
-// source is the content of the module's file path, named from the module root.
-func (m MutantExecutorDealer) source(path string) ([]byte, error) {
-	return os.ReadFile(filepath.Join(m.mod.Root, filepath.FromSlash(path)))
 }
 
 // digest is the hex SHA-256 of src.
@@ -241,22 +234,19 @@ func (m *MutantExecutorDealer) Resume(ctx context.Context, d Deferred) ([]mutato
 }
 
 // sameRun checks that this run settles d's mutants as the run that deferred them would have: with
-// the same settings, in files whose content is the content that run recorded, each mutant's file
-// among them. It answers that content by each file's path from the module root.
+// the same settings, among the same files of their packages and module (tree) with the same
+// content, each mutant's file among them. It answers that content by each file's path from the
+// module root.
 func (m *MutantExecutorDealer) sameRun(d Deferred) (map[string][]byte, error) {
 	if here := m.settings(); d.Settings != here {
 		return nil, fmt.Errorf("the run that deferred the mutants had the settings %+v, this run has %+v", d.Settings, here)
 	}
-	sources := map[string][]byte{}
-	for _, f := range d.Files {
-		src, err := m.source(f.Path)
-		if err != nil {
-			return nil, err
-		}
-		if digest(src) != f.SHA256 {
-			return nil, fmt.Errorf("%s changed since the run that deferred its mutants", f.Path)
-		}
-		sources[f.Path] = src
+	sources, err := m.tree(m.mutantDirs(d.Mutants))
+	if err != nil {
+		return nil, err
+	}
+	if err := sameFiles(d.Files, sources); err != nil {
+		return nil, err
 	}
 	for _, dm := range d.Mutants {
 		if _, recorded := sources[m.fromRoot(dm.File)]; !recorded {

@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -50,6 +51,8 @@ const (
 	deferredJSON  = "deferred.json"
 	slowTag       = "slow"
 	allPkgs       = "./..."
+	fileP         = "p/a.go"
+	otherContent  = "other"
 )
 
 var (
@@ -130,10 +133,151 @@ func TestDeferNamesAnExtraMutantByItsTextsAndEachFileOnce(t *testing.T) {
 	}
 }
 
-func TestDeferFailsWithoutTheDigestOfAMutatedFile(t *testing.T) {
+func TestDeferFailsWhenItCannotReadAPendingMutantsPackage(t *testing.T) {
 	dealer, _ := aloneDealer(t, &sequence{}, "")
+	mut := mutantAt(mutator.Runnable, 8)
+	mut.position.Filename = "missing/a.go"
+	if _, err := dealer.Defer([]mutator.Mutator{mut}); err == nil {
+		t.Fatal("deferred a mutant of a directory it could not read")
+	}
+}
+
+// treeFiles are the files of a module whose package p has a pending mutant, each with whether a
+// Deferred records it: the package's files and those of the directories below it, but for one
+// whose name starts with "." or "_" and a nested module, and the module's go.mod and go.sum.
+var treeFiles = []struct {
+	path     string
+	recorded bool
+}{
+	{"go.mod", true},
+	{"go.sum", true},
+	{fileP, true},
+	{"p/a_test.go", true},
+	{"p/testdata/in.txt", true},
+	{"p/static/page.html", true},
+	{"p/sub/b.go", true},
+	{"p/.cache/c.txt", false},
+	{"p/_build/d.go", false},
+	{"p/nested/go.mod", false},
+	{"p/nested/n.go", false},
+	{"q/c.go", false},
+	{"README.md", false},
+}
+
+// treeRoot is a module root holding treeFiles, p/a.go with sumSource as its content and every
+// other file with its path.
+func treeRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	for _, f := range treeFiles {
+		name := filepath.Join(root, filepath.FromSlash(f.path))
+		if err := os.MkdirAll(filepath.Dir(name), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		content := f.path
+		if f.path == fileP {
+			content = sumSource
+		}
+		if err := os.WriteFile(name, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	return root
+}
+
+func TestDeferRecordsEveryFileAPendingMutantsVerdictCanRestOn(t *testing.T) {
+	dealer, _ := aloneDealerIn(t, treeRoot(t), &sequence{}, "")
+	mut := mutantAt(mutator.Runnable, 8)
+	mut.position.Filename = fileP
+	got, err := dealer.Defer([]mutator.Mutator{mut})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, f := range got.Files {
+		paths = append(paths, f.Path)
+	}
+	var want []string
+	for _, f := range treeFiles {
+		if f.recorded {
+			want = append(want, f.path)
+		}
+	}
+	slices.Sort(want)
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("recorded %v, want %v", paths, want)
+	}
+	// The hex SHA-256 of "p/a_test.go" (sha256sum).
+	if got.Files[3].SHA256 != "9c52f4af99f845fe63e000aa63c947fd2872518fa95c1042e1cd8dce856b3d61" {
+		t.Errorf("p/a_test.go recorded with %s", got.Files[3].SHA256)
+	}
+}
+
+func TestDeferRecordsTheToolchain(t *testing.T) {
+	tc := engine.Toolchain{GoVersion: "go1.27.1", GOOS: "linux", GOARCH: "arm64", GOFLAGS: "-mod=mod"}
+	dealer, _ := aloneDealerIn(t, sumRoot(t), &sequence{}, "", engine.WithToolchain(tc))
+	if got, err := dealer.Defer(nil); err != nil || got.Settings.Toolchain != tc {
+		t.Errorf("%+v: %v, want %+v", got.Settings, err, tc)
+	}
+}
+
+func TestDeferFailsOnAModuleFileItCannotRead(t *testing.T) {
+	root := sumRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, "go.sum", "inside"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	dealer, _ := aloneDealerIn(t, root, &sequence{}, "")
 	if _, err := dealer.Defer([]mutator.Mutator{mutantAt(mutator.Runnable, 8)}); err == nil {
-		t.Fatal("deferred a mutant of a file it could not read")
+		t.Fatal("deferred without the digest of go.sum")
+	}
+}
+
+// treeChanges are changes to the module of treeRoot after a run deferred a mutant of its package
+// p: the file written, its content, and the start of the error of the run that settles the
+// mutant, "" for a change of a file the verdict cannot rest on, which the run settles in.
+var treeChanges = []struct {
+	path, content, want string
+}{
+	{"p/a_test.go", "package p", "p/a_test.go changed since"},
+	{"p/testdata/in.txt", otherContent, "p/testdata/in.txt changed since"},
+	{"p/static/page.html", otherContent, "p/static/page.html changed since"},
+	{"p/sub/new.go", "package sub", "p/sub/new.go is new since"},
+	{"go.mod", "module other", "go.mod changed since"},
+	{"go.sum", "", "go.sum changed since"},
+	{"q/c.go", "package q", ""},
+	{"p/.cache/c.txt", otherContent, ""},
+	{"p/_build/d.go", "package d", ""},
+	{"p/nested/n.go", "package n", ""},
+	{"README.md", otherContent, ""},
+}
+
+func TestResumeRefusesATreeThatChangedInAFileItRecorded(t *testing.T) {
+	for _, tc := range treeChanges {
+		t.Run(tc.path, func(t *testing.T) {
+			root := treeRoot(t)
+			deferring, _ := aloneDealerIn(t, root, &sequence{}, "")
+			mut := mutantAt(mutator.Runnable, 8)
+			mut.position.Filename = fileP
+			d, err := deferring.Defer([]mutator.Mutator{mut})
+			if err != nil {
+				t.Fatal(err)
+			}
+			d.Mutants = []engine.DeferredMutant{{File: fileP, Line: 4, Column: 11, Type: arithmeticBase, Pkg: pkgP, First: crashedRun}}
+			if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(tc.path)), []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			seq := &sequence{runs: []execContext{fakeExecCommandSuccess}}
+			mod := gomodule.GoModule{Name: pkgP, Root: root, CallingDir: "."}
+			settling := engine.NewExecutorDealer(mod, workdir.NewCachedDealer(t.TempDir(), root), expectedTimeout, engine.WithExecContext(seq.exec))
+			_, err = settling.Resume(context.Background(), d)
+			if tc.want == "" && (err != nil || len(seq.all()) != 1) {
+				t.Errorf("%v after %v, want the mutant run alone", err, seq.all())
+			}
+			if tc.want != "" && (err == nil || !strings.HasPrefix(err.Error(), tc.want) || len(seq.all()) != 0) {
+				t.Errorf("%v after %v, want %q before any run", err, seq.all(), tc.want)
+			}
+		})
 	}
 }
 
@@ -290,8 +434,10 @@ var sameRunErrors = []struct {
 	{"another -cpu", func(d *engine.Deferred) { d.Settings.TestCPU = 2 }, otherSettings},
 	{"other coverage packages", func(d *engine.Deferred) { d.Settings.CoverPkg = allPkgs }, otherSettings},
 	{"a changed file", func(d *engine.Deferred) { d.Files[0].SHA256 = packageDigest }, "a.go changed since the run that deferred its mutants"},
-	{"a file that is gone", func(d *engine.Deferred) { d.Files = append(d.Files, engine.DeferredFile{Path: fileB}) }, fileB},
-	{"no file recorded", func(d *engine.Deferred) { d.Files = nil }, "a.go is not among the files"},
+	{"a file that is gone", func(d *engine.Deferred) { d.Files = append(d.Files, engine.DeferredFile{Path: fileB}) }, "b.go is gone since the run that deferred its mutants"},
+	{"no file recorded", func(d *engine.Deferred) { d.Files = nil }, "a.go is new since the run that deferred its mutants"},
+	{"another toolchain", func(d *engine.Deferred) { d.Settings.Toolchain.GoVersion = "go1.26.4" }, otherSettings},
+	{"other GOFLAGS", func(d *engine.Deferred) { d.Settings.Toolchain.GOFLAGS = "-race" }, otherSettings},
 }
 
 func TestResumeRefusesARunThatChanged(t *testing.T) {
