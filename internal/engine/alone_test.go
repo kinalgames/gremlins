@@ -83,7 +83,7 @@ func hanging(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 
 // aloneElapsed is how long the package's tests last for aloneDealer: a mutant's time is three times
 // that, which a hanging run passes and every other fake run stays well within.
-const aloneElapsed = 500 * time.Millisecond
+const aloneElapsed = time.Second
 
 // sequence runs its commands in turn, the last for every command after it, and records them.
 type sequence struct {

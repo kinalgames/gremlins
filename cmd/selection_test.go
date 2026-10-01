@@ -23,10 +23,12 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/go-gremlins/gremlins/internal/configuration"
+	"github.com/go-gremlins/gremlins/internal/engine"
 	"github.com/go-gremlins/gremlins/internal/gomodule"
 	"github.com/go-gremlins/gremlins/internal/log"
 	"github.com/go-gremlins/gremlins/internal/mutator"
@@ -170,6 +172,8 @@ var verdictCases = []struct {
 	// The replaced module is missing beside every copy: a setup failure, which is no verdict.
 	{"relrep", nil, map[string]string{"ext/go.mod": "module example.com/ext\n\ngo 1.24\n", "ext/ext.go": "package ext\n\n// Zero is zero.\nconst Zero = 0\n"},
 		map[string]mutator.Status{"relrep.go:8 ARITHMETIC_BASE": mutator.Unclassified, "relrep.go:11 ARITHMETIC_BASE": mutator.Unclassified}},
+	// Each mutant panics in init: a crash that repeats alone, where the unmutated code passes.
+	{"crashinit", nil, nil, map[string]mutator.Status{"crashinit.go:6 ARITHMETIC_BASE": mutator.Killed, "crashinit.go:6 CONDITIONALS_NEGATION": mutator.Killed}},
 	// The killed mutant of a.go cannot be undone; b.go's mutant runs in a fresh copy.
 	{"dirty", map[string]any{configuration.UnleashWorkersKey: 1}, nil,
 		map[string]mutator.Status{"a.go:6 ARITHMETIC_BASE": mutator.Killed, "b.go:4 ARITHMETIC_BASE": mutator.Lived}},
@@ -188,5 +192,56 @@ func TestEachMutantsVerdictRestsOnItsOwnCode(t *testing.T) {
 				t.Fatalf("verdicts %v, want %v; logged %s", got, tc.want, logged)
 			}
 		})
+	}
+}
+
+// deferredCases are fixtures of verdictCases whose mutants all run again alone.
+var deferredCases = []string{"crashinit", "outside"}
+
+func TestARunThatDefersItsRunsAloneLeavesTheVerdictsToTheRunThatSettlesThem(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs gremlins with the go command")
+	}
+	t.Setenv("GOWORK", "off")
+	t.Setenv("GOFLAGS", "-mod=mod")
+	for _, tc := range verdictCases {
+		if !slices.Contains(deferredCases, tc.fixture) {
+			continue
+		}
+		t.Run(tc.fixture, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "deferred.json")
+			settings := maps.Clone(tc.settings)
+			if settings == nil {
+				settings = map[string]any{}
+			}
+			settings[configuration.UnleashSettleLaterKey] = path
+			if got, logged := unleash(t, filepath.Join("testdata", tc.fixture), settings, tc.beside); len(got) != 0 {
+				t.Fatalf("the deferring run reported %v; logged %s", got, logged)
+			}
+			delete(settings, configuration.UnleashSettleLaterKey)
+			settings[configuration.UnleashSettleKey] = path
+			if got, logged := unleash(t, filepath.Join("testdata", tc.fixture), settings, tc.beside); !maps.Equal(got, tc.want) {
+				t.Fatalf("settled %v, want %v; logged %s", got, tc.want, logged)
+			}
+		})
+	}
+}
+
+func TestASettlingRunRefusesAFileItCannotUse(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "none.json")
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere.json")
+	if err := engine.WriteDeferred(elsewhere, engine.Deferred{Mutants: []engine.DeferredMutant{{File: "unbuilt.go", Line: 1, Column: 1, Type: "ARITHMETIC_BASE", Kill: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{missing, elsewhere} {
+		configuration.Set(configuration.UnleashSettleKey, path)
+		mod, err := gomodule.Init(filepath.Join("testdata", "unbuilt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := run(context.Background(), mod, t.TempDir()); err == nil {
+			t.Errorf("settled from %s", path)
+		}
+		configuration.Reset()
 	}
 }

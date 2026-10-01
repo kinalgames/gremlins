@@ -324,6 +324,27 @@ Enables/disables the [REMOVE_SELF ASSIGNMENTS](../../mutations/remove_self_assig
 gremlins unleash --remove-self-assignments
 ```
 
+### Settle later
+
+:material-flag: `--settle-later` · :material-sign-direction: Default: none
+
+A mutant that timed out or crashed, and a kill by selected tests that waits for its confirmation,
+runs again alone once every other mutant has run, so that the load of the other runs does not
+decide its verdict. When several Gremlins runs share a machine, alone means alone on the
+machine: with `--settle-later <file>`, Gremlins writes those mutants to the file instead of
+running them, and leaves them out of its results. A later run with `--settle <file>` on the same
+path, once no other run loads the machine, runs each of them alone, one at a time, with the time
+the first run gave its mutants, and reports their verdicts. Without pending mutants, no file is
+written.
+
+```shell
+gremlins unleash --settle-later=pending.json ./pkg
+gremlins unleash --settle=pending.json ./pkg
+```
+
+The run with `--settle` gathers no coverage and runs no other mutant; give it the first run's
+other settings.
+
 ### Tags
 
 :material-flag: `--tags`/`-t` · :material-sign-direction: Default: empty

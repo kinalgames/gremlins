@@ -49,6 +49,8 @@ const (
 	UnleashThresholdMCoverageKey = "unleash.threshold.mutant-coverage"
 	UnleashTestSelectionKey      = "unleash.test-selection"
 	UnleashSelectionConfirmKey   = "unleash.test-selection-confirm"
+	UnleashSettleLaterKey        = "unleash.settle-later"
+	UnleashSettleKey             = "unleash.settle"
 )
 
 const (

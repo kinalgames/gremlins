@@ -153,9 +153,12 @@ func newSelector(ec execContext, mod gomodule.GoModule, wdd workdir.Dealer, buil
 	}
 	confirm := configuration.Get[int](configuration.UnleashSelectionConfirmKey)
 
-	return selection.New(builder, confirm, func(pkg string, err error) {
-		log.Errorf("test selection, %s: %v\n", pkg, err)
-	})
+	return selection.New(builder, confirm, reportSelection)
+}
+
+// reportSelection logs what a selector reports of pkg.
+func reportSelection(pkg string, err error) {
+	log.Errorf("test selection, %s: %v\n", pkg, err)
 }
 
 // NewExecutor returns a new workerpool.Executor for the given mutator.Mutator.

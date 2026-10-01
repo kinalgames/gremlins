@@ -120,15 +120,22 @@ func New(builder Builder, confirmPercent int, report func(pkg string, err error)
 	}
 }
 
-// state is the package's state, indexed on first use.
-func (s *Selector) state(pkg string) *pkgState {
+// entry is the package's state, not indexed yet unless state indexed it.
+func (s *Selector) entry(pkg string) *pkgState {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	st, found := s.pkgs[pkg]
 	if !found {
 		st = &pkgState{}
 		s.pkgs[pkg] = st
 	}
-	s.mu.Unlock()
+
+	return st
+}
+
+// state is the package's state, indexed on first use.
+func (s *Selector) state(pkg string) *pkgState {
+	st := s.entry(pkg)
 	st.once.Do(func() {
 		index, err := s.builder.Index(pkg)
 		if err != nil {
@@ -181,14 +188,16 @@ func (s *Selector) Sampled(pkg, id string) bool {
 	return s.Disabled(pkg) || int(h.Sum32()%100) < s.confirm
 }
 
-// Disabled reports whether every later mutant of pkg runs every test (Disable).
+// Disabled reports whether every later mutant of pkg runs every test (Disable). It does not index
+// the package.
 func (s *Selector) Disabled(pkg string) bool {
-	return s.state(pkg).disabled.Load()
+	return s.entry(pkg).disabled.Load()
 }
 
-// Disable makes every later mutant of pkg run every test, for the reason err.
+// Disable makes every later mutant of pkg run every test, for the reason err. It does not index
+// the package.
 func (s *Selector) Disable(pkg string, err error) {
-	if !s.state(pkg).disabled.Swap(true) {
+	if !s.entry(pkg).disabled.Swap(true) {
 		s.report(pkg, fmt.Errorf("SELECTION DISAGREES WITH THE WHOLE SUITE, every test runs for its remaining mutants: %w", err))
 	}
 }

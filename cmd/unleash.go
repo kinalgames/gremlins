@@ -22,6 +22,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/MakeNowJust/heredoc"
 	"github.com/spf13/cobra"
@@ -61,6 +62,8 @@ const (
 	paramTimeoutCoefficient = "timeout-coefficient"
 	paramTestSelection      = "test-selection"
 	paramSelectionConfirm   = "test-selection-confirm"
+	paramSettleLater        = "settle-later"
+	paramSettle             = "settle"
 
 	// Thresholds.
 	paramThresholdEfficacy  = "threshold-efficacy"
@@ -161,6 +164,9 @@ func cleanUp(wd string) {
 }
 
 func run(ctx context.Context, mod gomodule.GoModule, workDir string) (report.Results, error) {
+	if path := configuration.Get[string](configuration.UnleashSettleKey); path != "" {
+		return settle(ctx, mod, workDir, path)
+	}
 	fDiff, err := diff.New(mod.Root)
 	if err != nil {
 		return report.Results{}, err
@@ -195,6 +201,28 @@ func run(ctx context.Context, mod gomodule.GoModule, workDir string) (report.Res
 	return results, nil
 }
 
+// settle gives the mutants a run with --settle-later wrote to the file path their verdicts, each
+// run alone in a copy of the module in workDir, and logs each verdict.
+func settle(ctx context.Context, mod gomodule.GoModule, workDir, path string) (report.Results, error) {
+	d, err := engine.ReadDeferred(path)
+	if err != nil {
+		return report.Results{}, fmt.Errorf("failed to read the deferred runs: %w", err)
+	}
+	wdDealer := workdir.NewCachedDealer(workDir, mod.Root)
+	defer wdDealer.Clean()
+	start := time.Now()
+	muts, err := engine.NewExecutorDealer(mod, wdDealer, 0).Resume(ctx, d)
+	if err != nil {
+		return report.Results{}, fmt.Errorf("failed to settle the deferred runs: %w", err)
+	}
+	logger := report.NewLogger()
+	for _, m := range muts {
+		logger.Mutant(m)
+	}
+
+	return report.Results{Mutants: muts, Elapsed: time.Since(start), Module: mod.Name}, nil
+}
+
 func setFlagsOnCmd(cmd *cobra.Command) error {
 	cmd.Flags().SortFlags = false
 	cmd.Flags().SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
@@ -223,6 +251,8 @@ func setFlagsOnCmd(cmd *cobra.Command) error {
 		{Name: paramTimeoutCoefficient, CfgKey: configuration.UnleashTimeoutCoefficientKey, DefaultV: 0, Usage: "the coefficient by which the timeout is increased"},
 		{Name: paramTestSelection, CfgKey: configuration.UnleashTestSelectionKey, DefaultV: false, Usage: "run, for each mutant, only the tests that cover its position (each test's coverage is gathered once per package)"},
 		{Name: paramSelectionConfirm, CfgKey: configuration.UnleashSelectionConfirmKey, DefaultV: 5, Usage: "with --test-selection, the percentage of a package's subset kills confirmed with every test, besides its first"},
+		{Name: paramSettleLater, CfgKey: configuration.UnleashSettleLaterKey, DefaultV: "", Usage: "write the mutants that must run again alone to this file, for a later run with --settle, and leave them out of this run's results"},
+		{Name: paramSettle, CfgKey: configuration.UnleashSettleKey, DefaultV: "", Usage: "run alone, one at a time, only the mutants a run with --settle-later wrote to this file, and report their verdicts"},
 	}
 
 	for _, f := range fls {

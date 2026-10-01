@@ -53,6 +53,9 @@ type unsettled struct {
 	mu    sync.Mutex
 	first map[mutator.Mutator]outcome
 	kills map[mutator.Mutator]subsetKill
+	// resumed says the kills are those a run deferred (Defer), whose confirmations are the kills to
+	// recheck alone: that run knew each package's lowest kill.
+	resumed bool
 }
 
 func newUnsettled() *unsettled {
@@ -98,7 +101,7 @@ func (u *unsettled) confirmations() []mutator.Mutator {
 		}
 	}
 	for _, mut := range lowest {
-		if k := u.kills[mut]; !k.confirmed && !k.recheck {
+		if k := u.kills[mut]; !u.resumed && !k.confirmed && !k.recheck {
 			muts = append(muts, mut)
 		}
 	}

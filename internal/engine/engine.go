@@ -34,6 +34,7 @@ import (
 	"github.com/go-gremlins/gremlins/internal/diff"
 	"github.com/go-gremlins/gremlins/internal/engine/workerpool"
 	"github.com/go-gremlins/gremlins/internal/exclusion"
+	"github.com/go-gremlins/gremlins/internal/log"
 	"github.com/go-gremlins/gremlins/internal/mutator"
 	"github.com/go-gremlins/gremlins/internal/report"
 
@@ -238,14 +239,40 @@ func (mu *Engine) executeTests(ctx context.Context) report.Results {
 		mu.logger.Mutant(m)
 		mutants = append(mutants, m)
 	}
-	if len(pending) > 0 {
-		settler.Settle(ctx, pending)
+	if len(pending) == 0 || mu.deferSettle(pending) {
+		return results(mutants)
 	}
+	settler.Settle(ctx, pending)
 	for _, m := range pending {
 		mu.logger.Mutant(m)
 	}
 
 	return results(append(mutants, pending...))
+}
+
+// Deferrer is a Settler that can hand its pending mutants to a later run (Deferred).
+type Deferrer interface {
+	Defer(pending []mutator.Mutator) Deferred
+}
+
+// deferSettle writes the pending mutants to the file --settle-later names, for a later run with
+// --settle to give them their verdicts, and reports whether it did: they are then left out of
+// this run's results. Without the setting, or when the file cannot be written, this run settles
+// them.
+func (mu *Engine) deferSettle(pending []mutator.Mutator) bool {
+	path := configuration.Get[string](configuration.UnleashSettleLaterKey)
+	deferrer, ok := mu.jDealer.(Deferrer)
+	if path == "" || !ok {
+		return false
+	}
+	if err := WriteDeferred(path, deferrer.Defer(pending)); err != nil {
+		log.Errorf("failed to defer the runs alone to %s, so they run now\n\t%v\n", path, err)
+
+		return false
+	}
+	log.Infof("%d mutants wait to run alone: gremlins unleash --settle %s\n", len(pending), path)
+
+	return true
 }
 
 func checkDone(ctx context.Context) bool {

@@ -267,6 +267,9 @@ func TestEveryKillOfADisabledPackageIsSampled(t *testing.T) {
 	if !s.Disabled(pkgA) || sampled(s, pkgA, 100) != 100 || s.Disabled(pkgB) || sampled(s, pkgB, 100) != 0 {
 		t.Fatal("a disabled package's kills are not all sampled, or another package's are")
 	}
+	if got := builder.calls.Load(); got != 0 { // a run that settles deferred mutants indexes nothing
+		t.Fatalf("disabling and sampling indexed %d times", got)
+	}
 }
 
 func TestADisabledPackageRunsEveryTest(t *testing.T) {
