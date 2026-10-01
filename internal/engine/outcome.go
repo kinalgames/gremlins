@@ -17,9 +17,11 @@
 package engine
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"os/exec"
-	"regexp"
+	"strings"
 
 	"github.com/go-gremlins/gremlins/internal/mutator"
 )
@@ -29,16 +31,16 @@ type outcome int
 
 const (
 	passed   outcome = iota // every test it ran passed
-	failed                  // a test failed on the mutant: a panic the testing package reports is one
+	failed                  // a test failed on the mutant: a panic inside a test is one
 	unbuilt                 // the mutated code does not build
 	timedOut                // the run passed its time, or the test binary its -timeout
-	crashed                 // the test binary or the go command was ended by a signal
-	broken                  // the run could not be carried out
+	crashed                 // the package failed with no test failing: a signal, a panic outside a test, TestMain's exit
+	broken                  // the run could not be carried out: the go command did not start, or refused its flags
 )
 
-// statuses are the verdicts of the outcomes. A time-out counts as killed; a crash or a run that
-// could not be carried out reaches no verdict. Each of the three runs again alone (again), whose
-// verdict is aloneStatus's.
+// statuses are the verdicts of the outcomes. A time-out counts as killed; a crash reaches no
+// verdict until it runs again alone (again), as does a time-out, whose verdict is aloneStatus's;
+// a run that could not be carried out reaches none.
 var statuses = [...]mutator.Status{
 	passed:   mutator.Lived,
 	failed:   mutator.Killed,
@@ -56,12 +58,12 @@ func (o outcome) status() mutator.Status {
 // again reports whether a mutant whose run ended so runs again alone, once every other mutant has
 // run: the load it ran under may have caused the outcome.
 func (o outcome) again() bool {
-	return o == timedOut || o == crashed || o == broken
+	return o == timedOut || o == crashed
 }
 
-// aloneStatus is the verdict of a mutant whose run ended first and whose run alone ended alone. A
-// time-out or a crash counts as a kill only when it repeats; anything else that needs a run alone
-// is unclassified; a test failure, a pass or a build failure is its own verdict.
+// aloneStatus is the verdict of a mutant whose run ended first and whose run alone, with every test
+// of its package, ended alone. A time-out or a crash counts as a kill only when it repeats; a
+// pass, a test failure or a build failure is its own verdict; anything else is unclassified.
 func aloneStatus(first, alone outcome) mutator.Status {
 	switch {
 	case alone == timedOut && first == timedOut:
@@ -74,15 +76,6 @@ func aloneStatus(first, alone outcome) mutator.Status {
 		return alone.status()
 	}
 }
-
-var (
-	// buildFailed is the line go test ends a package with when its test binary does not build.
-	buildFailed = regexp.MustCompile(`(?m)^FAIL\s+\S+\s+\[(build|setup) failed\]$`)
-	// testTimedOut is the panic of a test binary past its -timeout.
-	testTimedOut = regexp.MustCompile(`(?m)^panic: test timed out after `)
-	// signalled is the line go test prints for a test binary a signal ended.
-	signalled = regexp.MustCompile(`(?m)^signal: `)
-)
 
 // noExit is the exit code of a run that could not be carried out: the command did not start, or
 // did not end on its own.
@@ -103,45 +96,89 @@ func exitCode(err error) int {
 	}
 }
 
-// classify is the outcome of a go test run that exited with code after printing output; late says
-// that the run's time had passed.
-func classify(late bool, code int, output []byte) outcome {
+// classify is the outcome of a go test -json run that exited with code and wrote ev; late says
+// that the run's time had passed. Exit status 2 is the go command refusing its flags.
+func classify(late bool, code int, ev *events) outcome {
 	switch {
 	case late:
 		return timedOut
 	case code == 0:
 		return passed
-	case code == noExit:
+	case code == noExit || code > 1:
 		return broken
 	case code < 0:
 		return crashed
-	case buildFailed.Match(output):
+	case ev.unbuilt:
 		return unbuilt
-	case testTimedOut.Match(output):
-		return timedOut
-	case signalled.Match(output):
-		return crashed
-	case code == 1:
+	case ev.testFailed:
 		return failed
-	case code == 2: // go test's status for a package it could not test, kept from upstream
-		return unbuilt
+	case ev.timedOut:
+		return timedOut
 	default:
-		return broken
+		return crashed
 	}
 }
 
-// maxOutput is how much of the end of a run's output classify reads: the lines it looks for are
-// go test's last.
-const maxOutput = 64 << 10
+// maxEvent bounds an event line of go test -json: a longer one, an output line of that size, is
+// skipped, which no event classify reads can be.
+const maxEvent = 1 << 20
 
-// tail keeps the last maxOutput bytes written to it.
-type tail struct{ buf []byte }
+// timeoutPanic starts the output line of a test binary past its -timeout.
+const timeoutPanic = "panic: test timed out after "
 
-func (t *tail) Write(p []byte) (int, error) {
-	t.buf = append(t.buf, p...)
-	if over := len(t.buf) - maxOutput; over > 0 {
-		t.buf = t.buf[over:]
+// events reads the events go test -json writes, line by line as they come, and keeps what classify
+// needs: a build that failed, a test that failed, a test binary past its -timeout.
+type events struct {
+	line       []byte
+	skip       bool // the line being read passed maxEvent
+	unbuilt    bool
+	testFailed bool
+	timedOut   bool
+}
+
+// event is the part of a test2json event that classify reads.
+type event struct {
+	Action      string
+	Test        string
+	FailedBuild string
+	Output      string
+}
+
+func (e *events) Write(p []byte) (int, error) {
+	n := len(p)
+	for len(p) > 0 {
+		end := bytes.IndexByte(p, '\n')
+		if end < 0 {
+			e.add(p)
+
+			break
+		}
+		e.add(p[:end])
+		e.read()
+		p = p[end+1:]
 	}
 
-	return len(p), nil
+	return n, nil
+}
+
+// add appends p to the line being read, or skips the line once it passes maxEvent.
+func (e *events) add(p []byte) {
+	if e.skip || len(e.line)+len(p) > maxEvent {
+		e.skip, e.line = true, e.line[:0]
+
+		return
+	}
+	e.line = append(e.line, p...)
+}
+
+// read reads the complete line as an event; a line that is not one, such as a line of the go
+// command's own, says nothing.
+func (e *events) read() {
+	var ev event
+	if !e.skip && json.Unmarshal(e.line, &ev) == nil {
+		e.unbuilt = e.unbuilt || ev.Action == "build-fail" || (ev.Action == "fail" && ev.FailedBuild != "")
+		e.testFailed = e.testFailed || (ev.Action == "fail" && ev.Test != "")
+		e.timedOut = e.timedOut || (ev.Action == "output" && strings.HasPrefix(ev.Output, timeoutPanic))
+	}
+	e.skip, e.line = false, e.line[:0]
 }

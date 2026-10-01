@@ -417,19 +417,22 @@ Gremlins checks the subset's verdict with every test of the package:
 
 - a mutant the selected tests let live runs every test, whose verdict stands, since a test that
   kills it may need the tests before it;
-- a mutant the selected tests kill counts as KILLED only if those tests pass together on the
-  unmutated code (checked once per package and selection); otherwise every test runs and its
-  verdict stands;
-- the first such kill of each package, and a deterministic share of the others
-  (`--test-selection-confirm`), run every test as well; if every test disagrees, Gremlins logs
-  `SELECTION DISAGREES WITH THE WHOLE SUITE` and runs every test for the package's remaining
-  mutants.
+- a mutant the selected tests kill, time out or crash on counts so only if those tests pass
+  together on the unmutated code (checked once per package and selection); otherwise every test
+  runs and its verdict stands. A subset that hangs on the unmutated code fails this check;
+- a deterministic share of the kills (`--test-selection-confirm`) runs every test at once, and
+  once every mutant has run, each package's lowest kill (by file, line, column and type) runs
+  every test too. If every test disagrees, Gremlins logs `SELECTION DISAGREES WITH THE WHOLE
+  SUITE`, runs every test for the package's remaining mutants, and runs every test again for each
+  of its kills that no whole suite confirmed;
+- a subset that timed out or crashed runs again alone with every test, as any such mutant does.
 
-A subset's NOT VIABLE stands; a subset that timed out runs again alone with every test, as any
-mutant that timed out does. What these checks do not catch is a
+The verdicts do not depend on which mutant ends first. What these checks do not catch is a
 mutant that itself leaves state behind that makes a later selected test fail, outside the
-confirmed share: such a mutant can count as KILLED although the whole suite would let it live.
-Running the suite with `go test -shuffle=on` finds the order-dependent tests this needs.
+confirmed kills: such a mutant counts as KILLED although the whole suite would let it live. A
+test does fail on that mutant, and the same tests pass together on the unmutated code. Running
+the suite with `go test -shuffle=on`, and resetting shared state before each test, keeps such
+tests out.
 
 ```shell
 gremlins unleash --test-selection
@@ -440,8 +443,8 @@ gremlins unleash --test-selection
 :material-flag: `--test-selection-confirm` · :material-sign-direction: Default: `5`
 
 The percentage of a package's kills by selected tests that Gremlins runs again with every test
-of the package, besides the package's first, which always runs again. The share is chosen by a
-hash of the mutant's position and type, so the same mutants are confirmed on every run.
+of the package, besides the package's lowest kill, which always runs again. The share is chosen
+by a hash of the mutant's position and type, so the same mutants are confirmed on every run.
 
 ```shell
 gremlins unleash --test-selection --test-selection-confirm=10

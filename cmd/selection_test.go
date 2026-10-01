@@ -30,24 +30,77 @@ import (
 )
 
 // selectionCases are fixtures of internal/selection/testdata where a subset of the tests can
-// answer otherwise than the whole suite, and the verdicts the whole suite gives their mutants.
+// answer otherwise than the whole suite, and their verdicts with test selection and without it.
 var selectionCases = []struct {
 	fixture string
 	workers int
-	want    map[string]mutator.Status
+	with    map[string]mutator.Status
+	without map[string]mutator.Status
 }{
 	// TestA and TestC fail together without TestB between them.
-	{"pollute", 0, map[string]mutator.Status{"pollute.go:23 ARITHMETIC_BASE": mutator.Lived}},
+	{"pollute", 0,
+		map[string]mutator.Status{"pollute.go:23 ARITHMETIC_BASE": mutator.Lived},
+		map[string]mutator.Status{"pollute.go:23 ARITHMETIC_BASE": mutator.Lived}},
 	// Only TestCheck checks the cached path, which it reaches only after TestPrime.
-	{"warmcache", 0, map[string]mutator.Status{
-		"warmcache.go:9 ARITHMETIC_BASE":  mutator.Killed,
-		"warmcache.go:13 ARITHMETIC_BASE": mutator.Lived,
-	}},
+	{"warmcache", 0,
+		map[string]mutator.Status{"warmcache.go:9 ARITHMETIC_BASE": mutator.Killed, "warmcache.go:13 ARITHMETIC_BASE": mutator.Lived},
+		map[string]mutator.Status{"warmcache.go:9 ARITHMETIC_BASE": mutator.Killed, "warmcache.go:13 ARITHMETIC_BASE": mutator.Lived}},
 	// Indexing takes longer than a mutant's time: TestMain sleeps a second before each test.
-	{"slowmain", 2, map[string]mutator.Status{
-		"slowmain.go:6 CONDITIONALS_BOUNDARY": mutator.Lived,
-		"slowmain.go:6 CONDITIONALS_NEGATION": mutator.Lived,
-	}},
+	{"slowmain", 2,
+		map[string]mutator.Status{"slowmain.go:6 CONDITIONALS_BOUNDARY": mutator.Lived, "slowmain.go:6 CONDITIONALS_NEGATION": mutator.Lived},
+		map[string]mutator.Status{"slowmain.go:6 CONDITIONALS_BOUNDARY": mutator.Lived, "slowmain.go:6 CONDITIONALS_NEGATION": mutator.Lived}},
+	// TestA and TestC hang together without TestB between them.
+	{"hang", 0,
+		map[string]mutator.Status{"hang.go:21 ARITHMETIC_BASE": mutator.Lived},
+		map[string]mutator.Status{"hang.go:21 ARITHMETIC_BASE": mutator.Lived}},
+	// The accepted residual case: the mutant of Add leaves the total negative for TestC, which
+	// TestB would have reset; TestA and TestC pass together on the unmutated code, and the mutant
+	// is neither the package's lowest kill nor in the 5 % sample. With selection it is KILLED, as a
+	// test does fail on it; the whole suite lets it live.
+	{"residual", 0,
+		map[string]mutator.Status{"residual.go:7 ARITHMETIC_BASE": mutator.Killed, "residual.go:11 ARITHMETIC_BASE": mutator.Killed},
+		map[string]mutator.Status{"residual.go:7 ARITHMETIC_BASE": mutator.Killed, "residual.go:11 ARITHMETIC_BASE": mutator.Lived}},
+}
+
+// unleash runs gremlins with the go command on a copy of the module in dir, with the settings
+// and the arithmetic and conditional mutants, and answers each mutant's verdict by
+// "file:line TYPE".
+func unleash(t *testing.T, dir string, settings map[string]any) map[string]mutator.Status {
+	t.Helper()
+	copied := filepath.Join(t.TempDir(), filepath.Base(dir))
+	if err := os.CopyFS(copied, os.DirFS(dir)); err != nil {
+		t.Fatal(err)
+	}
+	mod, err := gomodule.Init(copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { // the coverage run changes to the module's directory
+		if err := os.Chdir(wd); err != nil {
+			t.Error(err)
+		}
+	}()
+	defer configuration.Reset()
+	for k, v := range settings {
+		configuration.Set(k, v)
+	}
+	for _, mt := range []mutator.Type{mutator.ArithmeticBase, mutator.ConditionalsBoundary, mutator.ConditionalsNegation} {
+		configuration.Set(configuration.MutantTypeEnabledKey(mt), true)
+	}
+	results, err := run(context.Background(), mod, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]mutator.Status{}
+	for _, m := range results.Mutants {
+		got[fmt.Sprintf("%s:%d %s", filepath.Base(m.Position().Filename), m.Position().Line, m.Type())] = m.Status()
+	}
+
+	return got
 }
 
 func TestTestSelectionKeepsTheWholeSuitesVerdicts(t *testing.T) {
@@ -62,32 +115,17 @@ func TestTestSelectionKeepsTheWholeSuitesVerdicts(t *testing.T) {
 	}
 	for _, tc := range selectionCases {
 		t.Run(tc.fixture, func(t *testing.T) {
-			dir := filepath.Join(t.TempDir(), tc.fixture)
-			if err := os.CopyFS(dir, os.DirFS(filepath.Join(fixtures, tc.fixture))); err != nil {
-				t.Fatal(err)
+			dir := filepath.Join(fixtures, tc.fixture)
+			with := unleash(t, dir, map[string]any{
+				configuration.UnleashTestSelectionKey:    true,
+				configuration.UnleashSelectionConfirmKey: 5,
+				configuration.UnleashWorkersKey:          tc.workers,
+			})
+			if !maps.Equal(with, tc.with) {
+				t.Errorf("with selection: %v, want %v", with, tc.with)
 			}
-			t.Chdir(".") // the coverage run changes to the module's directory
-			mod, err := gomodule.Init(dir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(configuration.Reset)
-			configuration.Set(configuration.UnleashTestSelectionKey, true)
-			configuration.Set(configuration.UnleashSelectionConfirmKey, 5)
-			configuration.Set(configuration.UnleashWorkersKey, tc.workers)
-			for _, mt := range []mutator.Type{mutator.ArithmeticBase, mutator.ConditionalsBoundary, mutator.ConditionalsNegation} {
-				configuration.Set(configuration.MutantTypeEnabledKey(mt), true)
-			}
-			results, err := run(context.Background(), mod, t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
-			got := map[string]mutator.Status{}
-			for _, m := range results.Mutants {
-				got[fmt.Sprintf("%s:%d %s", filepath.Base(m.Position().Filename), m.Position().Line, m.Type())] = m.Status()
-			}
-			if !maps.Equal(got, tc.want) {
-				t.Errorf("verdicts %v, want %v", got, tc.want)
+			if without := unleash(t, dir, map[string]any{configuration.UnleashWorkersKey: tc.workers}); !maps.Equal(without, tc.without) {
+				t.Errorf("without selection: %v, want %v", without, tc.without)
 			}
 		})
 	}
@@ -99,22 +137,8 @@ func TestAMutantThatDoesNotBuildIsNotViable(t *testing.T) {
 	}
 	t.Setenv("GOWORK", "off")
 	t.Setenv("GOFLAGS", "-mod=mod")
-	dir := filepath.Join(t.TempDir(), "unbuilt")
-	if err := os.CopyFS(dir, os.DirFS(filepath.Join("testdata", "unbuilt"))); err != nil {
-		t.Fatal(err)
-	}
-	mod, err := gomodule.Init(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(".") // the coverage run changes to the module's directory
-	t.Cleanup(configuration.Reset)
-	configuration.Set(configuration.MutantTypeEnabledKey(mutator.ArithmeticBase), true)
-	results, err := run(context.Background(), mod, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(results.Mutants) != 1 || results.Mutants[0].Status() != mutator.NotViable {
-		t.Fatalf("mutants %v", results.Mutants)
+	got := unleash(t, filepath.Join("testdata", "unbuilt"), nil)
+	if want := map[string]mutator.Status{"unbuilt.go:6 ARITHMETIC_BASE": mutator.NotViable}; !maps.Equal(got, want) {
+		t.Fatalf("verdicts %v, want %v", got, want)
 	}
 }

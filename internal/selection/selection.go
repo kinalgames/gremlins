@@ -27,11 +27,13 @@
 // build failure, a test that fails when it runs alone) runs the whole suite for every mutant.
 //
 // Selection assumes that a test's outcome does not depend on which tests ran before it in the same
-// process. The engine guards a subset's verdict where that assumption can fail: a subset's kill
-// counts only if the same subset passes on the unmutated code, a sample of the kills and every
-// survivor are run again with the whole suite, and a package whose sample disagrees runs the whole
-// suite for the rest of the run. What remains is a mutant that itself leaves state behind for a
-// later selected test, outside the sample.
+// process. The engine guards a subset's verdict where that assumption can fail: a subset's kill,
+// time-out or crash counts only if the same subset passes on the unmutated code; every survivor,
+// a fixed sample of the kills and each package's lowest kill run again with the whole suite; and a
+// package whose confirmation disagrees runs the whole suite for the rest of the run, its other
+// kills included. What remains is a mutant that itself leaves state behind for a later selected
+// test, outside the confirmed kills: a test does fail on it, and the same tests pass together on
+// the unmutated code.
 package selection
 
 import (
@@ -100,7 +102,6 @@ type pkgState struct {
 	once     sync.Once
 	index    Index
 	disabled atomic.Bool
-	kills    atomic.Int64
 }
 
 type passState struct {
@@ -109,10 +110,9 @@ type passState struct {
 }
 
 // New is a Selector indexing packages with builder. confirmPercent of a package's subset kills
-// are confirmed with the whole suite, its first always (Sampled). report hears of each package
-// that could not be indexed, of each subset that fails on the unmutated code, and of each package
-// whose confirmation disagreed; each of those runs the whole suite where it would have run the
-// subset.
+// are confirmed with the whole suite (Sampled). report hears of each package that could not be
+// indexed, of each subset that fails on the unmutated code, and of each package whose confirmation
+// disagreed; each of those runs the whole suite where it would have run the subset.
 func New(builder Builder, confirmPercent int, report func(pkg string, err error)) *Selector {
 	return &Selector{
 		builder: builder, confirm: max(confirmPercent, 0), report: report,
@@ -143,12 +143,11 @@ func (s *Selector) state(pkg string) *pkgState {
 
 // Pattern is the -run pattern of the tests of pkg that cover pos; "" runs every test of pkg.
 func (s *Selector) Pattern(pkg string, pos token.Position) string {
-	st := s.state(pkg)
-	if st.disabled.Load() {
+	if s.Disabled(pkg) {
 		return ""
 	}
 
-	return st.index.Pattern(pos)
+	return s.state(pkg).index.Pattern(pos)
 }
 
 // Passes reports whether the tests pattern selects in pkg pass together on the unmutated code,
@@ -173,14 +172,18 @@ func (s *Selector) Passes(pkg, pattern string) bool {
 }
 
 // Sampled reports whether the subset kill of the mutant id in pkg is to be confirmed with the
-// whole suite: the package's first subset kill, and the kills whose id hashes into the confirmed
-// percentage, the same mutants on every run.
+// whole suite now: every kill of a disabled package, and the kills whose id hashes into the
+// confirmed percentage, the same mutants on every run.
 func (s *Selector) Sampled(pkg, id string) bool {
-	first := s.state(pkg).kills.Add(1) == 1
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(id))
 
-	return first || int(h.Sum32()%100) < s.confirm
+	return s.Disabled(pkg) || int(h.Sum32()%100) < s.confirm
+}
+
+// Disabled reports whether every later mutant of pkg runs every test (Disable).
+func (s *Selector) Disabled(pkg string) bool {
+	return s.state(pkg).disabled.Load()
 }
 
 // Disable makes every later mutant of pkg run every test, for the reason err.

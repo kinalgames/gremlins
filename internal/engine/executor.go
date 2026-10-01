@@ -61,7 +61,7 @@ type MutantExecutorDealer struct {
 	buildTags         string
 	testExecutionTime time.Duration
 	selector          *selection.Selector
-	firsts            *firsts
+	unsettled         *unsettled
 	dryRun            bool
 	integrationMode   bool
 	testCPU           int
@@ -116,7 +116,7 @@ func NewExecutorDealer(mod gomodule.GoModule, wdd workdir.Dealer, elapsed time.D
 		testCPU:           testCPU,
 		testExecutionTime: elapsed * time.Duration(coefficient),
 		execContext:       exec.CommandContext,
-		firsts:            &firsts{of: map[mutator.Mutator]outcome{}},
+		unsettled:         newUnsettled(),
 	}
 
 	for _, opt := range opts {
@@ -128,6 +128,9 @@ func NewExecutorDealer(mod gomodule.GoModule, wdd workdir.Dealer, elapsed time.D
 
 	return &jd
 }
+
+// waitDelay bounds how long a run's output is awaited after it ends or is stopped.
+const waitDelay = 5 * time.Second
 
 // selectionTree is the work directory of the copy of the module the selection's tests run in,
 // never the source: the workers copy the source while the first packages are indexed.
@@ -175,7 +178,7 @@ func (m MutantExecutorDealer) executor(mut mutator.Mutator, outCh chan<- mutator
 		testCPU:           m.testCPU,
 		testExecutionTime: m.testExecutionTime,
 		selector:          m.selector,
-		firsts:            m.firsts,
+		unsettled:         m.unsettled,
 	}
 }
 
@@ -191,7 +194,7 @@ type mutantExecutor struct {
 	buildTags         string
 	testExecutionTime time.Duration
 	selector          *selection.Selector
-	firsts            *firsts
+	unsettled         *unsettled
 	dryRun            bool
 	integrationMode   bool
 	testCPU           int
@@ -206,8 +209,8 @@ type mutantExecutor struct {
 // will be LIVED, if the tests fail, the TokenMutator will be KILLED.
 // The timeout of the test is managed outside the run of the test, using
 // a context with timeout. This is done because the Go test command doesn't
-// make it easy to distinguish failures from timeouts. A run that timed out,
-// crashed or could not be carried out is recorded to run again alone (AloneRunner).
+// make it easy to distinguish failures from timeouts. A run that timed out or
+// crashed is recorded to run again alone (Settler).
 func (m *mutantExecutor) Start(w *workerpool.Worker) {
 	defer m.wg.Done()
 	rootDir := m.workdir(fmt.Sprintf("%s-%d", w.Name, w.ID))
@@ -220,7 +223,7 @@ func (m *mutantExecutor) Start(w *workerpool.Worker) {
 
 	o := m.test(func() outcome { return m.runTests(rootDir, m.mutant.Pkg()) })
 	if o.again() {
-		m.firsts.put(m.mutant, o)
+		m.unsettled.runAgain(m.mutant, o)
 	}
 	m.mutant.SetStatus(o.status())
 	m.outCh <- m.mutant
@@ -268,36 +271,42 @@ func (m *mutantExecutor) runTests(rootDir, pkg string) outcome {
 	return m.confirm(rootDir, pkg, pattern, o)
 }
 
-// confirm is the verdict of a subset run, status, once checked against the whole suite where the
-// two can differ: a survivor, since a test that kills it may have been left out or need the tests
-// before it; a kill by a subset that fails on the unmutated code too; and a sample of the other
-// kills (selection.Selector.Sampled), any disagreement of which makes the package's later mutants
-// run every test. A subset's other outcomes stand: a time-out, a crash or a run that could not be
-// carried out runs again alone, with every test.
+// confirm is the verdict of a subset run that ended o, once checked against the whole suite where
+// the two can differ. A survivor runs every test, since a test that kills it may have been left out
+// or need the tests before it. A kill, a time-out or a crash runs every test when the subset fails
+// on the unmutated code too. A kill runs every test when it is in the sample (Sampled), and a
+// disagreement makes the package's later mutants run every test; any other kill is recorded for
+// Settle. A build failure, or a run that could not be carried out, is its own verdict; a time-out
+// or a crash runs again alone, with every test.
 func (m *mutantExecutor) confirm(rootDir, pkg, pattern string, o outcome) outcome {
-	if o == passed {
+	switch {
+	case o == passed:
 		return m.runSuite(rootDir, pkg, "")
-	}
-	if o != failed {
+	case o == unbuilt || o == broken:
+		return o
+	case !m.selector.Passes(pkg, pattern):
+		return m.runSuite(rootDir, pkg, "")
+	case o != failed:
 		return o
 	}
-	if !m.selector.Passes(pkg, pattern) {
-		return m.runSuite(rootDir, pkg, "")
-	}
-	pos := m.mutant.Position()
-	if !m.selector.Sampled(pkg, fmt.Sprintf("%s:%d:%d %s", pos.Filename, pos.Line, pos.Column, m.mutant.Type())) {
+	id := mutantID(m.mutant)
+	if !m.selector.Sampled(pkg, id) {
+		m.unsettled.kill(m.mutant, subsetKill{pkg: pkg})
+
 		return o
 	}
 	full := m.runSuite(rootDir, pkg, "")
-	if full != failed {
-		m.selector.Disable(pkg, fmt.Errorf("the tests %s killed the mutant %s at %s, every test let it end %s", pattern, m.mutant.Type(), pos, full.status()))
+	if full == failed {
+		m.unsettled.kill(m.mutant, subsetKill{pkg: pkg, confirmed: true})
+	} else {
+		m.selector.Disable(pkg, fmt.Errorf("the tests %s killed the mutant %s, every test let it end %s", pattern, id, full.status()))
 	}
 
 	return full
 }
 
 // runSuite runs the tests of pkg that pattern selects (every test for "") on the mutant, within
-// the mutant's time, and reads how the run ended from its output's end.
+// the mutant's time, and reads how the run ended from its exit code and go test's -json events.
 func (m *mutantExecutor) runSuite(rootDir, pkg, pattern string) outcome {
 	ctx, cancel := context.WithTimeout(context.Background(), m.testExecutionTime)
 	defer cancel()
@@ -309,13 +318,15 @@ func (m *mutantExecutor) runSuite(rootDir, pkg, pattern string) outcome {
 	}
 	cmd.Env = append(cmd.Env, os.Environ()...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("GOTMPDIR=%s", m.wdDealer.WorkDir()))
-	output := &tail{}
-	cmd.Stdout, cmd.Stderr = output, output
+	ev := &events{}
+	cmd.Stdout = ev
+	killTree(cmd)
+	cmd.WaitDelay = waitDelay
 
 	rel, err := run(cmd)
 	defer rel()
 
-	return classify(errors.Is(ctx.Err(), context.DeadlineExceeded), exitCode(err), output.buf)
+	return classify(errors.Is(ctx.Err(), context.DeadlineExceeded), exitCode(err), ev)
 }
 
 // selectedTests is the -run pattern of the tests of pkg that cover the mutant's position, or ""
@@ -329,7 +340,7 @@ func (m *mutantExecutor) selectedTests(pkg string) string {
 }
 
 func (m *mutantExecutor) getTestArgs(pkg, pattern string) []string {
-	args := []string{"test"}
+	args := []string{"test", "-json"}
 	if m.buildTags != "" {
 		args = append(args, "-tags", m.buildTags)
 	}

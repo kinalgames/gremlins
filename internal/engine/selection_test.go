@@ -39,9 +39,11 @@ import (
 )
 
 const (
-	fileA   = "a.go"
-	testOne = "^(TestOne)$"
-	initmod = "initmod"
+	// failTogether is in the report of a subset that fails on the unmutated code.
+	failTogether = "fail together"
+	fileA        = "a.go"
+	testOne      = "^(TestOne)$"
+	initmod      = "initmod"
 )
 
 // indexStub answers, for every package after delay, an index of a.go where TestOne covers lines
@@ -118,6 +120,16 @@ func runMutant(t *testing.T, mut *mutantStub, got *commands, elapsed time.Durati
 	start(dealer, mut, "selection")
 
 	return got.all()[before:]
+}
+
+// newDealer is a dealer starting its commands with exec, its package's tests lasting
+// expectedTimeout.
+func newDealer(t *testing.T, exec execContext, opts ...engine.ExecutorDealerOption) *engine.MutantExecutorDealer {
+	t.Helper()
+	mod := gomodule.GoModule{Name: expectedModule, Root: t.TempDir(), CallingDir: "."}
+
+	return engine.NewExecutorDealer(mod, tempDealer{newWdDealerStub(t)}, expectedTimeout,
+		append([]engine.ExecutorDealerOption{engine.WithExecContext(exec)}, opts...)...)
 }
 
 // start runs mut to its end on an executor of dealer.
@@ -203,21 +215,30 @@ func TestAMutantRunsTheTestsThatCoverIt(t *testing.T) {
 	}
 }
 
-// confirmCases are a subset's verdict, how every test answers, and the verdict that stands.
+// confirmCases are a subset's outcome, how every test answers, and the verdict that stands, with the
+// share of kills confirmed, whether the subset fails on the unmutated code, the commands run, whether
+// the verdict waits for Settle, and what the selector reports.
 var confirmCases = []struct {
 	name          string
 	subset, whole execContext
-	failing       bool // the subset fails on the unmutated code
+	confirm       int
+	failing       bool
 	status        mutator.Status
 	runs          int
+	pending       bool
 	heard         string
 }{
-	{"a survivor every test kills", fakeExecCommandSuccess, fakeExecCommandTestsFailure, false, mutator.Killed, 2, ""},
-	{"a survivor every test lets live", fakeExecCommandSuccess, fakeExecCommandSuccess, false, mutator.Lived, 2, ""},
-	{"a kill by a subset that fails unmutated", fakeExecCommandTestsFailure, fakeExecCommandSuccess, true, mutator.Lived, 2, "fail together"},
-	{"a first kill every test agrees with", fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, false, mutator.Killed, 2, ""},
-	{"a first kill every test disagrees with", fakeExecCommandTestsFailure, fakeExecCommandSuccess, false, mutator.Lived, 2, "SELECTION DISAGREES"},
-	{"a subset that does not build", fakeExecCommandBuildFailure, fakeExecCommandSuccess, false, mutator.NotViable, 1, ""},
+	{"a survivor every test kills", fakeExecCommandSuccess, fakeExecCommandTestsFailure, 0, false, mutator.Killed, 2, false, ""},
+	{"a survivor every test lets live", fakeExecCommandSuccess, fakeExecCommandSuccess, 0, false, mutator.Lived, 2, false, ""},
+	{"a kill by a subset that fails unmutated", fakeExecCommandTestsFailure, fakeExecCommandSuccess, 0, true, mutator.Lived, 2, false, failTogether},
+	{"a kill outside the sample", fakeExecCommandTestsFailure, fakeExecCommandSuccess, 0, false, mutator.Killed, 1, true, ""},
+	{"a sampled kill every test agrees with", fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, 100, false, mutator.Killed, 2, false, ""},
+	{"a sampled kill every test disagrees with", fakeExecCommandTestsFailure, fakeExecCommandSuccess, 100, false, mutator.Lived, 2, false, "SELECTION DISAGREES"},
+	{"a subset that does not build", fakeExecCommandBuildFailure, fakeExecCommandSuccess, 0, false, mutator.NotViable, 1, false, ""},
+	{"a time-out of a subset that hangs unmutated", binaryLate, fakeExecCommandSuccess, 0, true, mutator.Lived, 2, false, failTogether},
+	{"a time-out of a subset that passes unmutated", binaryLate, fakeExecCommandSuccess, 0, false, mutator.TimedOut, 1, true, ""},
+	{"a crash of a subset that fails unmutated", crashedBinary, fakeExecCommandSuccess, 0, true, mutator.Lived, 2, false, failTogether},
+	{"a crash of a subset that passes unmutated", crashedBinary, fakeExecCommandSuccess, 0, false, mutator.Unclassified, 1, true, ""},
 }
 
 func TestASubsetsVerdictIsCheckedWithEveryTestWhereTheTwoCanDiffer(t *testing.T) {
@@ -226,10 +247,15 @@ func TestASubsetsVerdictIsCheckedWithEveryTestWhereTheTwoCanDiffer(t *testing.T)
 			got := &commands{subset: tc.subset, whole: tc.whole}
 			h := &heard{}
 			stub := &indexStub{failing: map[string]bool{testOne: tc.failing}}
+			dealer := newDealer(t, got.exec, engine.WithSelector(selection.New(stub, tc.confirm, h.report)))
 			mut := mutantAt(mutator.Runnable, 3)
-			runs := runMutant(t, mut, got, expectedTimeout, engine.WithSelector(selection.New(stub, 0, h.report)))
+			start(dealer, mut, "selection")
+			runs := got.all()
 			if mut.Status() != tc.status || len(runs) != tc.runs || runArg(runs[0]) != testOne || (tc.runs == 2 && runArg(runs[1]) != "") {
 				t.Errorf("%v after %v, want %v after %d commands", mut.Status(), runs, tc.status, tc.runs)
+			}
+			if dealer.Pending(mut) != tc.pending {
+				t.Errorf("pending %t", dealer.Pending(mut))
 			}
 			if heard := h.all(); (tc.heard == "") != (heard == "") || !strings.Contains(heard, tc.heard) {
 				t.Errorf("heard %q, want %q", heard, tc.heard)
@@ -238,32 +264,13 @@ func TestASubsetsVerdictIsCheckedWithEveryTestWhereTheTwoCanDiffer(t *testing.T)
 	}
 }
 
-func TestAKillOutsideTheSampleStands(t *testing.T) {
-	got := &commands{subset: fakeExecCommandTestsFailure, whole: fakeExecCommandTestsFailure}
-	sel := engine.WithSelector(selection.New(&indexStub{}, 0, (&heard{}).report))
-	if runs := runMutant(t, mutantAt(mutator.Runnable, 3), got, expectedTimeout, sel); len(runs) != 2 {
-		t.Fatalf("the first kill: %v", runs)
-	}
-	mut := mutantAt(mutator.Runnable, 4)
-	if runs := runMutant(t, mut, got, expectedTimeout, sel); len(runs) != 1 || mut.Status() != mutator.Killed {
-		t.Fatalf("the second kill: %v after %v", mut.Status(), runs)
-	}
-}
-
 func TestADisagreementMakesThePackageRunEveryTest(t *testing.T) {
 	got := &commands{subset: fakeExecCommandTestsFailure, whole: fakeExecCommandSuccess}
-	sel := engine.WithSelector(selection.New(&indexStub{}, 0, (&heard{}).report))
-	runMutant(t, mutantAt(mutator.Runnable, 3), got, expectedTimeout, sel)
-	if runs := runMutant(t, mutantAt(mutator.Runnable, 4), got, expectedTimeout, sel); len(runs) != 1 || runArg(runs[0]) != "" {
+	dealer := newDealer(t, got.exec, engine.WithSelector(selection.New(&indexStub{}, 100, (&heard{}).report)))
+	start(dealer, mutantAt(mutator.Runnable, 3), "selection")
+	start(dealer, mutantAt(mutator.Runnable, 4), "selection")
+	if runs := got.all(); len(runs) != 3 || runArg(runs[2]) != "" {
 		t.Fatalf("after the disagreement: %v", runs)
-	}
-}
-
-func TestASubsetsTimeOutStands(t *testing.T) {
-	mut := mutantAt(mutator.Runnable, 3)
-	runs := runMutant(t, mut, passing(), time.Nanosecond, engine.WithSelector(selection.New(&indexStub{}, 0, (&heard{}).report)))
-	if len(runs) != 1 || mut.Status() != mutator.TimedOut {
-		t.Fatalf("%v after %v", mut.Status(), runs)
 	}
 }
 

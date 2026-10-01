@@ -227,13 +227,13 @@ func sampled(s *selection.Selector, pkg string, n int) int {
 	return count
 }
 
-func TestThePackagesFirstKillAndTheConfirmedShareAreSampled(t *testing.T) {
+func TestTheConfirmedShareOfKillsIsSampled(t *testing.T) {
 	cases := []struct {
 		percent  int
 		min, max int
 	}{
-		{-5, 1, 1}, // the first kill only
-		{0, 1, 1},
+		{-5, 0, 0},
+		{0, 0, 0},
 		{5, 400, 600},
 		{100, 10000, 10000},
 	}
@@ -246,16 +246,26 @@ func TestThePackagesFirstKillAndTheConfirmedShareAreSampled(t *testing.T) {
 	}
 }
 
-func TestTheSampleIsTheSameOnEveryRun(t *testing.T) {
+func TestTheSampleIsTheSameOnEveryRunWhateverTheOrder(t *testing.T) {
 	builder := &builderStub{indexes: map[string]selection.Index{}}
 	first, second := selection.New(builder, 50, (&heard{}).report), selection.New(builder, 50, (&heard{}).report)
-	first.Sampled(pkgA, "warm-up")
-	second.Sampled(pkgA, "another warm-up")
 	for i := range 200 {
-		id := fmt.Sprintf("m%d", i)
-		if first.Sampled(pkgA, id) != second.Sampled(pkgA, id) {
-			t.Fatalf("%s is sampled on one run only", id)
+		id, reverse := fmt.Sprintf("m%d", i), fmt.Sprintf("m%d", 199-i)
+		if first.Sampled(pkgA, id) != second.Sampled(pkgA, id) || first.Sampled(pkgA, reverse) != second.Sampled(pkgA, reverse) {
+			t.Fatalf("%s or %s is sampled on one run only", id, reverse)
 		}
+	}
+}
+
+func TestEveryKillOfADisabledPackageIsSampled(t *testing.T) {
+	builder := &builderStub{indexes: map[string]selection.Index{}}
+	s := selection.New(builder, 0, (&heard{}).report)
+	if s.Disabled(pkgA) || s.Sampled(pkgA, "m1") {
+		t.Fatal("sampled before the package was disabled")
+	}
+	s.Disable(pkgA, errors.New("disagreed"))
+	if !s.Disabled(pkgA) || sampled(s, pkgA, 100) != 100 || s.Disabled(pkgB) || sampled(s, pkgB, 100) != 0 {
+		t.Fatal("a disabled package's kills are not all sampled, or another package's are")
 	}
 }
 

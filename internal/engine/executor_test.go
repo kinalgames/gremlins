@@ -310,7 +310,7 @@ func TestMutatorRun(t *testing.T) {
 			if tc.timeoutCoefficient != 0 {
 				wantTimeout = 2*time.Second + expectedTimeout*time.Duration(tc.timeoutCoefficient)
 			}
-			want := fmt.Sprintf("go test -tags %s -timeout %s -failfast %s", tc.tags, wantTimeout, tc.wantPath)
+			want := fmt.Sprintf("go test -json -tags %s -timeout %s -failfast %s", tc.tags, wantTimeout, tc.wantPath)
 			got := fmt.Sprintf("go %v", strings.Join(holder.args, " "))
 
 			if !cmp.Equal(got, want) {
@@ -428,18 +428,22 @@ func TestCoverageProcessSuccess(_ *testing.T) {
 	os.Exit(0) // skipcq: RVV-A0003
 }
 
+// TestProcessTestsFailure fails as go test -json does when a test fails.
 func TestProcessTestsFailure(_ *testing.T) {
 	if os.Getenv("GO_TEST_PROCESS") != "1" {
 		return
 	}
+	_, _ = os.Stdout.WriteString(`{"Action":"fail","Package":"example.com/p","Test":"TestOne"}` + "\n")
 	os.Exit(1) // skipcq: RVV-A0003
 }
 
+// TestProcessBuildFailure fails as go test -json does when the package does not build.
 func TestProcessBuildFailure(_ *testing.T) {
 	if os.Getenv("GO_TEST_PROCESS") != "1" {
 		return
 	}
-	os.Exit(2) // skipcq: RVV-A0003
+	_, _ = os.Stdout.WriteString(`{"Action":"build-fail","ImportPath":"example.com/p [example.com/p.test]"}` + "\n")
+	os.Exit(1) // skipcq: RVV-A0003
 }
 
 func TestMutatorRunInTheCorrectFolder(t *testing.T) {

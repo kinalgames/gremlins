@@ -17,57 +17,159 @@
 package engine
 
 import (
+	"cmp"
+	"context"
+	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/go-gremlins/gremlins/internal/mutator"
 )
 
-// AloneRunner is an ExecutorDealer that runs a mutant again, alone, once every other mutant has
-// run: a mutant whose run timed out, crashed or could not be carried out, whose outcome may come
-// from the load it ran under. Its verdict stands only when it repeats alone.
-type AloneRunner interface {
-	// Again reports whether mut runs again alone.
-	Again(mut mutator.Mutator) bool
-	// RunAlone runs mut again, with every test of its package, and sets its verdict.
-	RunAlone(mut mutator.Mutator)
+// Settler is an ExecutorDealer some of whose mutants' verdicts may still change once every mutant
+// has run: a time-out or a crash runs again alone, and a selection subset's kill that the whole
+// suite has not confirmed is confirmed for the package's lowest kill and for every kill of a
+// package whose confirmation disagreed.
+type Settler interface {
+	// Pending reports whether mut's verdict waits for Settle.
+	Pending(mut mutator.Mutator) bool
+	// Settle gives each of muts, all pending, its verdict, running them one at a time; a run
+	// cancelled before a mutant that needs a run leaves that mutant UNCLASSIFIED.
+	Settle(ctx context.Context, muts []mutator.Mutator)
 }
 
-// firsts are the outcomes of the mutants that run again alone.
-type firsts struct {
-	mu sync.Mutex
-	of map[mutator.Mutator]outcome
+// subsetKill is a mutant a selection subset killed in pkg; confirmed says the whole suite killed
+// it too.
+type subsetKill struct {
+	pkg       string
+	confirmed bool
 }
 
-func (f *firsts) put(mut mutator.Mutator, o outcome) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.of[mut] = o
+// unsettled is what Settle needs of a run: the outcomes that run again alone and the subset kills.
+type unsettled struct {
+	mu    sync.Mutex
+	first map[mutator.Mutator]outcome
+	kills map[mutator.Mutator]subsetKill
 }
 
-func (f *firsts) get(mut mutator.Mutator) (outcome, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	o, found := f.of[mut]
-
-	return o, found
+func newUnsettled() *unsettled {
+	return &unsettled{first: map[mutator.Mutator]outcome{}, kills: map[mutator.Mutator]subsetKill{}}
 }
 
-// aloneWorker names the work directory of the mutants that run again alone.
+func (u *unsettled) runAgain(mut mutator.Mutator, o outcome) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.first[mut] = o
+}
+
+func (u *unsettled) kill(mut mutator.Mutator, k subsetKill) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.kills[mut] = k
+}
+
+// pending reports whether mut runs again alone or is an unconfirmed subset kill.
+func (u *unsettled) pending(mut mutator.Mutator) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	_, again := u.first[mut]
+	k, killed := u.kills[mut]
+
+	return again || (killed && !k.confirmed)
+}
+
+// lowestKills are, in id order, the lowest subset kill of each package when the whole suite has not
+// confirmed it.
+func (u *unsettled) lowestKills() []mutator.Mutator {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	lowest := map[string]mutator.Mutator{}
+	for mut, k := range u.kills {
+		if l, found := lowest[k.pkg]; !found || byID(mut, l) < 0 {
+			lowest[k.pkg] = mut
+		}
+	}
+	var muts []mutator.Mutator
+	for _, mut := range lowest {
+		if !u.kills[mut].confirmed {
+			muts = append(muts, mut)
+		}
+	}
+	slices.SortFunc(muts, byID)
+
+	return muts
+}
+
+// mutantID names a mutant by its position and type, the same on every run.
+func mutantID(mut mutator.Mutator) string {
+	pos := mut.Position()
+
+	return fmt.Sprintf("%s:%d:%d %s", pos.Filename, pos.Line, pos.Column, mut.Type())
+}
+
+// byID orders mutants by file, line, column and type: the lowest kill of a package is the same
+// on every run.
+func byID(a, b mutator.Mutator) int {
+	pa, pb := a.Position(), b.Position()
+
+	return cmp.Or(
+		cmp.Compare(pa.Filename, pb.Filename),
+		cmp.Compare(pa.Line, pb.Line),
+		cmp.Compare(pa.Column, pb.Column),
+		cmp.Compare(a.Type(), b.Type()),
+	)
+}
+
+// aloneWorker names the work directory of the mutants that run alone.
 const aloneWorker = "alone"
 
-// Again reports whether mut's run ended so that it runs again alone.
-func (m MutantExecutorDealer) Again(mut mutator.Mutator) bool {
-	_, found := m.firsts.get(mut)
-
-	return found
+// Pending reports whether mut's verdict waits for Settle.
+func (m MutantExecutorDealer) Pending(mut mutator.Mutator) bool {
+	return m.unsettled.pending(mut)
 }
 
-// RunAlone runs mut again with every test of its package, in a work directory of its own, and
-// gives it the verdict of its two outcomes (aloneStatus). The engine calls it once no other mutant
-// runs.
-func (m MutantExecutorDealer) RunAlone(mut mutator.Mutator) {
-	first, _ := m.firsts.get(mut)
+// Settle gives the pending mutants their verdicts, one at a time and in id order, so that the
+// verdicts do not depend on which mutant ended first: it confirms each package's lowest subset
+// kill with every test, disabling the package's selection when every test disagrees; it runs each
+// time-out and crash again alone; and it confirms every other subset kill of a disabled package.
+func (m MutantExecutorDealer) Settle(ctx context.Context, muts []mutator.Mutator) {
+	settled := map[mutator.Mutator]bool{}
+	for _, mut := range m.unsettled.lowestKills() {
+		settled[mut] = true
+		if o, ran := m.runAlone(ctx, mut, failed); ran && o != failed {
+			m.selector.Disable(mut.Pkg(), fmt.Errorf("the selected tests killed the mutant %s, every test let it end %s", mutantID(mut), o.status()))
+		}
+	}
+	muts = slices.Clone(muts)
+	slices.SortFunc(muts, byID)
+	for _, mut := range muts {
+		m.unsettled.mu.Lock()
+		first, again := m.unsettled.first[mut]
+		k, killed := m.unsettled.kills[mut]
+		m.unsettled.mu.Unlock()
+		switch {
+		case settled[mut]:
+		case again:
+			m.runAlone(ctx, mut, first)
+		case killed && m.selector.Disabled(k.pkg):
+			m.runAlone(ctx, mut, failed)
+		}
+	}
+}
+
+// runAlone runs mut again with every test of its package, in a work directory of its own, and
+// gives it the verdict of its first outcome and this run's (aloneStatus); it reports the outcome
+// and whether the run took place: a cancelled run leaves mut UNCLASSIFIED.
+func (m MutantExecutorDealer) runAlone(ctx context.Context, mut mutator.Mutator, first outcome) (outcome, bool) {
+	if !checkDone(ctx) {
+		mut.SetStatus(mutator.Unclassified)
+
+		return broken, false
+	}
 	e := m.executor(mut, nil, nil)
 	rootDir := e.workdir(aloneWorker)
-	mut.SetStatus(aloneStatus(first, e.test(func() outcome { return e.runSuite(rootDir, mut.Pkg(), "") })))
+	o := e.test(func() outcome { return e.runSuite(rootDir, mut.Pkg(), "") })
+	mut.SetStatus(aloneStatus(first, o))
+
+	return o, true
 }

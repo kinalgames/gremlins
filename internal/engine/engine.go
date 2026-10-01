@@ -227,34 +227,25 @@ func (mu *Engine) executeTests(ctx context.Context) report.Results {
 		close(outCh)
 	}()
 
-	alone, _ := mu.jDealer.(AloneRunner)
-	var again []mutator.Mutator
+	settler, _ := mu.jDealer.(Settler)
+	var pending []mutator.Mutator
 	for m := range outCh {
-		if alone != nil && alone.Again(m) {
-			again = append(again, m)
+		if settler != nil && settler.Pending(m) {
+			pending = append(pending, m)
 
 			continue
 		}
 		mu.logger.Mutant(m)
 		mutants = append(mutants, m)
 	}
-
-	return results(append(mutants, mu.runAlone(ctx, alone, again)...))
-}
-
-// runAlone runs each mutant of again alone, one after the other, now that no other mutant runs,
-// and logs its verdict. A run cancelled before a mutant's turn leaves it UNCLASSIFIED.
-func (mu *Engine) runAlone(ctx context.Context, alone AloneRunner, again []mutator.Mutator) []mutator.Mutator {
-	for _, m := range again {
-		if checkDone(ctx) {
-			alone.RunAlone(m)
-		} else {
-			m.SetStatus(mutator.Unclassified)
-		}
+	if len(pending) > 0 {
+		settler.Settle(ctx, pending)
+	}
+	for _, m := range pending {
 		mu.logger.Mutant(m)
 	}
 
-	return again
+	return results(append(mutants, pending...))
 }
 
 func checkDone(ctx context.Context) bool {

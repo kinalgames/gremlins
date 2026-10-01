@@ -347,6 +347,7 @@ func TestReportToFile(t *testing.T) {
 		stubMutant{status: mutator.NotViable, mutantType: mutator.InvertNegatives, position: newPosition("file3.go", 4, 200)},
 		stubMutant{status: mutator.Killed, mutantType: mutator.RemoveSelfAssignments, position: newPosition("file3.go", 4, 100)},
 		stubMutant{status: mutator.Unclassified, mutantType: mutator.ArithmeticBase, position: newPosition("file3.go", 5, 30)},
+		stubMutant{status: mutator.TimedOut, mutantType: mutator.ArithmeticBase, position: newPosition("file3.go", 6, 40)},
 	}
 	data := report.Results{
 		Module:  "example.com/go/module",

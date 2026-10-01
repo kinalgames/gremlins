@@ -19,12 +19,13 @@ Gremlins will report each mutation as:
 - `LIVED`: The mutation hasn't been caught by the test suite.
 - `TIMED OUT`: The tests timed out while testing the mutation, again when the mutation ran alone: the mutation
   actually made the tests fail, but not explicitly. It counts as killed.
-- `NOT VIABLE`: The mutation makes the build fail.
-- `UNCLASSIFIED`: No verdict was reached: the tests timed out, a signal ended the test binary, or the tests could not
-  run, and it did not repeat when the mutation ran alone. It never counts as killed.
+- `NOT VIABLE`: The mutated code does not build. It is reported, and counts neither as killed nor as lived.
+- `UNCLASSIFIED`: No verdict was reached. It never counts as killed.
 
-A mutation whose tests timed out, whose test binary a signal ended, or whose tests could not run, runs again alone
-once every other mutation has run, with every test of its package and the same timeout: the load of the other runs
-may have caused it. A time-out or a signal that repeats counts as killed (`TIMED OUT`, `KILLED`); a test failure, a
-pass or a build failure alone is the verdict; anything else is `UNCLASSIFIED`. A panic the testing package reports
-is a test failure: `KILLED`, with no run alone.
+Gremlins reads each run from the events of `go test -json`. A test that fails, a panic inside a test included, kills
+the mutation. A package that fails with no test failing (a signal that ended the test binary, a panic outside a test,
+`TestMain` exiting) is a crash. A time-out or a crash runs again alone once every other mutation has run, with every
+test of its package and the same timeout, since the load of the other runs may have caused it: a time-out that
+repeats is `TIMED OUT`, a crash that repeats is `KILLED`, a test failure, a pass or a build failure alone is the
+verdict, and anything else is `UNCLASSIFIED`. A run that could not be carried out (the go command did not start, or
+refused its flags with exit status 2) is `UNCLASSIFIED` at once.

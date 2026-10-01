@@ -178,7 +178,7 @@ func (r *reportStatus) fileReport() {
 			GoModule:            r.module,
 			TestEfficacy:        r.tEfficacy,
 			MutationsCoverage:   r.mCovered,
-			MutantsTotal:        r.lived + r.killed + r.notViable + r.unclassified,
+			MutantsTotal:        r.lived + r.killed + r.timedOut + r.notViable + r.unclassified,
 			MutantsKilled:       r.killed,
 			MutantsLived:        r.lived,
 			MutantsNotViable:    r.notViable,
