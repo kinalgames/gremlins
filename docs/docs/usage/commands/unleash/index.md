@@ -372,8 +372,8 @@ running them, and leaves them out of its results, whose summary counts them as p
 run with `--settle <file>` on the same path and package, once no other run loads the machine,
 runs each of them alone, one at a time, with the time the first run gave its mutants, and reports
 their verdicts. The first run's log ends with that command, the package named by its absolute
-path. A relative path given to `--settle-later`, `--settle` or `--output` is read from the
-directory Gremlins starts in.
+path. A relative package path, and a relative path given to `--settle-later`, `--settle` or
+`--output`, is read from the directory Gremlins starts in.
 
 ```shell
 gremlins unleash --settle-later=pending.json ./pkg
@@ -391,14 +391,21 @@ any test runs, when one of them differs:
 - the SHA-256 of every file in the directory of each pending mutant's package and in the
   directories below it (sources, tests, `testdata`, embedded files), save a directory whose name
   starts with `.` or `_`, a nested module, and the files the two runs write themselves: the
-  settle file, the temporary files beside it, and each run's `--output` report; a file changed,
-  gone or new is refused;
+  settle file, a temporary file the settle file's write leaves beside it (the settle file's name,
+  a dot and decimal digits, such as `pending.json.123456`), and each run's `--output` report; a
+  file changed, gone or new is refused;
 - the SHA-256 of the module's `go.mod` and `go.sum`.
 
 The check covers no other package the tests link outside those directories, no environment
 variable but `GOFLAGS` (`GOEXPERIMENT`, `CGO_ENABLED`, the tests' own), and nothing outside the
 module, such as the module cache. A hand-written mutant (`--extra-mutants`) must name its file
 in the case the disk does, or the first run refuses it.
+
+A run refuses, when it starts, a `--settle-later` or `--output` path that names an existing file
+in the directory of the package it runs or below, unless Gremlins wrote that file: a settle file
+(a JSON object with the members `settings` and `mutants`) or a report (a JSON object with the
+member `go_module`). The run would write over any other file there, and the check above leaves
+those paths out.
 
 A run with `--settle-later` removes the file at that path when it starts, and writes the new one
 to a temporary file it renames, so the path holds a whole file of this run or none: without

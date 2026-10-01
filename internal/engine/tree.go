@@ -184,9 +184,9 @@ func (m MutantExecutorDealer) mutantDirs(dms []DeferredMutant) []string {
 }
 
 // written is whether a file, by path from the module root, is one gremlins' runs write themselves:
-// the file at the absolute path settle, the temporary files beside it that WriteDeferred renames
-// to it, and the files at the absolute paths outputs. A path outside the module, relative or empty
-// names no file of it.
+// the file at the absolute path settle, the temporary files os.CreateTemp names beside it for
+// WriteDeferred (the settle file's name, a dot and decimal digits), and the files at the absolute
+// paths outputs. A path outside the module, relative or empty names no file of it.
 func (m MutantExecutorDealer) written(settle string, outputs ...string) func(string) bool {
 	files := map[string]bool{}
 	temp := ""
@@ -203,7 +203,9 @@ func (m MutantExecutorDealer) written(settle string, outputs ...string) func(str
 	}
 
 	return func(name string) bool {
-		return files[name] || temp != "" && strings.HasPrefix(name, temp)
+		rest, ok := strings.CutPrefix(name, temp)
+
+		return files[name] || temp != "" && ok && rest != "" && strings.Trim(rest, "0123456789") == ""
 	}
 }
 

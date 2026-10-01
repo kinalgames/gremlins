@@ -18,9 +18,13 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -116,6 +120,9 @@ func runUnleash(ctx context.Context) func(cmd *cobra.Command, args []string) err
 		if len(args) > 0 {
 			path = args[0]
 		}
+		if !filepath.IsAbs(path) { // the module root, and the files below it, named from the root
+			path = filepath.Join(wd, path)
+		}
 		absolute(wd, configuration.UnleashSettleKey, configuration.UnleashSettleLaterKey, configuration.UnleashOutputKey)
 		mod, err := gomodule.Init(path)
 		if err != nil {
@@ -179,6 +186,9 @@ func cleanUp(wd string) {
 }
 
 func run(ctx context.Context, mod gomodule.GoModule, workDir string) (report.Results, error) {
+	if err := refuseForeign(mod); err != nil {
+		return report.Results{}, err
+	}
 	if path := configuration.Get[string](configuration.UnleashSettleKey); path != "" {
 		return settle(ctx, mod, workDir, path)
 	}
@@ -252,6 +262,50 @@ func readToolchain(ctx context.Context, mod gomodule.GoModule) (engine.Toolchain
 	}
 
 	return tc, nil
+}
+
+// ownShapes are the files gremlins writes, by the members of the JSON object each holds: a settle
+// file (--settle-later) holds "settings" and "mutants", a report (--output) "go_module".
+var ownShapes = [][]string{{"settings", "mutants"}, {"go_module"}}
+
+// refuseForeign refuses a run whose --settle-later or --output path names an existing file in the
+// directory of the package it runs or below, unless gremlins wrote it (ownShapes): the run would
+// write over the file, and the check of a later --settle leaves those paths out, so a source or a
+// fixture there would escape it.
+func refuseForeign(mod gomodule.GoModule) error {
+	pkg := filepath.Join(mod.Root, mod.CallingDir)
+	for _, f := range []struct{ flag, key string }{{paramSettleLater, configuration.UnleashSettleLaterKey}, {paramOutput, configuration.UnleashOutputKey}} {
+		p := configuration.Get[string](f.key)
+		rel, err := filepath.Rel(pkg, p)
+		if p == "" || err != nil || !filepath.IsLocal(rel) {
+			continue
+		}
+		data, err := os.ReadFile(p) //nolint:gosec // the path the user names
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil || !ownFile(data) {
+			return fmt.Errorf("--%s %s names a file of the package that is neither a settle file nor a report gremlins wrote", f.flag, p)
+		}
+	}
+
+	return nil
+}
+
+// ownFile reports whether data is a JSON object of one of the ownShapes.
+func ownFile(data []byte) bool {
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(data, &doc) != nil {
+		return false
+	}
+
+	for _, members := range ownShapes {
+		if !slices.ContainsFunc(members, func(m string) bool { return doc[m] == nil }) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // extraMutants are the mutants the file --extra-mutants names lists, none without the setting.

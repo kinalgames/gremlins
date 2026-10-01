@@ -220,6 +220,9 @@ var ample = map[string]any{configuration.UnleashTimeoutCoefficientKey: 30}
 // modMod is the GOFLAGS of the fixtures' runs: their modules have no go.sum.
 const modMod = "-mod=mod"
 
+// testedit is the fixture cmd/testdata/testedit's directory name.
+const testedit = "testedit"
+
 // extraList is the list of the extra fixture's extra mutants, by its absolute path: the runs
 // change the working directory.
 var extraList, _ = filepath.Abs(filepath.Join("testdata", "extra.txt"))
@@ -354,7 +357,7 @@ func TestASettlingRunRefusesAnEditOfTheTestsOrTheToolchain(t *testing.T) {
 	t.Setenv("GOWORK", "off")
 	t.Setenv("GOFLAGS", modMod)
 	t.Setenv("TESTEDIT_MARKER", filepath.Join(t.TempDir(), "crashed"))
-	dir := filepath.Join("testdata", "testedit")
+	dir := filepath.Join("testdata", testedit)
 	path := filepath.Join(t.TempDir(), "deferred.json")
 	if first, logged := unleash(t, dir, "", map[string]any{configuration.UnleashSettleLaterKey: path, configuration.UnleashTimeoutCoefficientKey: 30}, nil); len(first) != 0 {
 		t.Fatalf("the deferring run reported %v; logged %s", first, logged)
@@ -372,39 +375,172 @@ func TestASettlingRunRefusesAnEditOfTheTestsOrTheToolchain(t *testing.T) {
 	}
 }
 
-// TestASettlingRunLeavesOutTheFilesTheRunsWrite runs both runs in one tree that holds the settle
-// file, a temporary file WriteDeferred left beside it, and the reports (-o) of both runs, as a run
-// on the module's own directory with relative paths leaves them.
+// command runs the unleash command from the directory wd on the package pkg with settings and the
+// arithmetic and conditional mutants, and answers what it logged and its error.
+func command(t *testing.T, wd, pkg string, settings map[string]any) (string, error) {
+	t.Helper()
+	t.Chdir(wd)
+	out := &bytes.Buffer{}
+	log.Reset()
+	log.Init(out, out)
+	defer log.Reset()
+	defer configuration.Reset()
+	for k, v := range settings {
+		configuration.Set(k, v)
+	}
+	for _, mt := range []mutator.Type{mutator.ArithmeticBase, mutator.ConditionalsBoundary, mutator.ConditionalsNegation} {
+		configuration.Set(configuration.MutantTypeEnabledKey(mt), true)
+	}
+	err := runUnleash(context.Background())(nil, []string{pkg})
+
+	return out.String(), err
+}
+
+// ownFilesCases are where a run starts, relative to the parent of a copy of the testedit module,
+// and the package and the files its runs write, relative to where it starts: all of them inside
+// the module, as the module's own directory (".") or a package named from above it leaves them.
+var ownFilesCases = []struct {
+	name, wd, pkg, dir string
+}{
+	{"from the module's directory", testedit, ".", ""},
+	{"from above the module", ".", testedit, testedit},
+}
+
+// TestASettlingRunLeavesOutTheFilesTheRunsWrite runs the command with relative paths whose files
+// all land in the module: the settle file, a temporary file WriteDeferred left beside it, and the
+// reports (-o) of each run; the hint's command settles, and settles again over its own report.
 func TestASettlingRunLeavesOutTheFilesTheRunsWrite(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs gremlins with the go command")
 	}
 	t.Setenv("GOWORK", "off")
 	t.Setenv("GOFLAGS", modMod)
-	t.Setenv("TESTEDIT_MARKER", filepath.Join(t.TempDir(), "crashed"))
-	copied := filepath.Join(t.TempDir(), "testedit")
-	if err := os.CopyFS(copied, os.DirFS(filepath.Join("testdata", "testedit"))); err != nil {
+	for _, tc := range ownFilesCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TESTEDIT_MARKER", filepath.Join(t.TempDir(), "crashed"))
+			parent := t.TempDir()
+			copied := filepath.Join(parent, testedit)
+			if err := os.CopyFS(copied, os.DirFS(filepath.Join("testdata", testedit))); err != nil {
+				t.Fatal(err)
+			}
+			wd := filepath.Join(parent, tc.wd)
+			pending, report := filepath.Join(tc.dir, "pending.json"), filepath.Join(tc.dir, "report.json")
+			deferring := map[string]any{configuration.UnleashSettleLaterKey: pending, configuration.UnleashOutputKey: report, configuration.UnleashTimeoutCoefficientKey: 30}
+			logged, err := command(t, wd, tc.pkg, deferring)
+			hint := "gremlins unleash --settle " + filepath.Join(copied, "pending.json") + " " + copied + "\n"
+			if err != nil || !strings.Contains(logged, hint) {
+				t.Fatalf("%v; logged %s, want the hint %q", err, logged, hint)
+			}
+			if err := os.WriteFile(filepath.Join(copied, "pending.json.123456"), []byte("a write that died"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			settling := map[string]any{configuration.UnleashSettleKey: pending, configuration.UnleashOutputKey: filepath.Join(tc.dir, "settled.json")}
+			for range 2 { // the second finds the first's report
+				logged, err := command(t, wd, tc.pkg, settling)
+				if err != nil || !strings.Contains(logged, "LIVED ARITHMETIC_BASE at testedit.go:6:30") {
+					t.Fatalf("%v; logged %s", err, logged)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(copied, "settled.json")); err != nil {
+				t.Errorf("the settling run's report: %v", err)
+			}
+		})
+	}
+}
+
+// TestASettlingRunChecksAFileNamedAfterTheSettleFile defers a mutant of the escape fixture to the
+// settle file check, beside check.go, and edits check.go so that TestA would kill the mutant.
+func TestASettlingRunChecksAFileNamedAfterTheSettleFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs gremlins with the go command")
+	}
+	t.Setenv("GOWORK", "off")
+	t.Setenv("GOFLAGS", modMod)
+	t.Setenv("ESCAPE_MARKER", filepath.Join(t.TempDir(), "crashed"))
+	copied := filepath.Join(t.TempDir(), "escape")
+	if err := os.CopyFS(copied, os.DirFS(filepath.Join("testdata", "escape"))); err != nil {
 		t.Fatal(err)
 	}
-	path, report := filepath.Join(copied, "pending.json"), filepath.Join(copied, "report.json")
-	deferring := map[string]any{configuration.UnleashSettleLaterKey: path, configuration.UnleashOutputKey: report, configuration.UnleashTimeoutCoefficientKey: 30}
-	if first, logged, err := unleashIn(t, copied, "", deferring); err != nil || len(first) != 0 {
+	path := filepath.Join(copied, "check")
+	if first, logged, err := unleashIn(t, copied, "", map[string]any{configuration.UnleashSettleLaterKey: path, configuration.UnleashTimeoutCoefficientKey: 30}); err != nil || len(first) != 0 {
 		t.Fatalf("the deferring run reported %v: %v; logged %s", first, err, logged)
 	}
-	for _, name := range []string{report, path + ".123456"} { // the deferring run's report, a write that died
-		if err := os.WriteFile(name, []byte("{}"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	strict := "package escape\n\n// Check reports whether v is the value A gives 1.\nfunc Check(v int) bool { return v == 2 }\n"
+	if err := os.WriteFile(filepath.Join(copied, "check.go"), []byte(strict), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	settling := map[string]any{configuration.UnleashSettleKey: path, configuration.UnleashOutputKey: filepath.Join(copied, "settled.json")}
-	for range 2 { // the second finds the first's report
-		got, logged, err := unleashIn(t, copied, "", settling)
-		if err != nil || !maps.Equal(got, map[string]mutator.Status{"testedit.go:6 ARITHMETIC_BASE": mutator.Lived}) {
-			t.Fatalf("settled %v: %v; logged %s", got, err, logged)
-		}
-		if err := os.WriteFile(filepath.Join(copied, "settled.json"), []byte("{}"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	if got, logged, err := unleashIn(t, copied, "", map[string]any{configuration.UnleashSettleKey: path}); err == nil || !strings.Contains(err.Error(), "check.go changed since the run that deferred its mutants") {
+		t.Fatalf("settled %v: %v; logged %s", got, err, logged)
+	}
+}
+
+// foreignCases are files at the path a run's --settle-later or --output names, relative to the
+// escape fixture's copy ("" for none), and the start of the run's refusal, "" for none.
+var foreignCases = []struct {
+	name, flag, path, content, want string
+}{
+	{"a source", configuration.UnleashOutputKey, "check.go", "", "--output "},
+	{"a fixture", configuration.UnleashSettleLaterKey, "testdata/golden.json", `{"a": 1}`, "--settle-later "},
+	{"a directory", configuration.UnleashOutputKey, "testdata", "", "--output "},
+	{"a settle file", configuration.UnleashSettleLaterKey, "pending.json", `{"timeout": 1, "settings": {}, "mutants": []}`, ""},
+	{"a report", configuration.UnleashOutputKey, "report.json", `{"go_module": "example.com/escape"}`, ""},
+	{"no file", configuration.UnleashOutputKey, "none.json", "", ""},
+}
+
+func TestARunRefusesToNameAFileOfThePackageGremlinsDidNotWrite(t *testing.T) {
+	for _, tc := range foreignCases {
+		t.Run(tc.name, func(t *testing.T) {
+			copied := filepath.Join(t.TempDir(), "escape")
+			if err := os.CopyFS(copied, os.DirFS(filepath.Join("testdata", "escape"))); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(copied, filepath.FromSlash(tc.path))
+			if tc.content != "" {
+				if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.path == "testdata" {
+				if err := os.Mkdir(path, 0o750); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, _ := os.ReadFile(path) //nolint:gosec // the test's own copy
+			defer configuration.Reset()
+			configuration.Set(tc.flag, path)
+			mod, err := gomodule.Init(copied)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = refuseForeign(mod)
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.HasPrefix(err.Error(), tc.want+path)) {
+				t.Errorf("%v, want %q", err, tc.want)
+			}
+			if after, _ := os.ReadFile(path); !bytes.Equal(after, before) { //nolint:gosec // the test's own copy
+				t.Errorf("the file changed to %q", after)
+			}
+		})
+	}
+}
+
+func TestARunNamingASourceAsItsReportLeavesItAsItIs(t *testing.T) {
+	copied := filepath.Join(t.TempDir(), "escape")
+	if err := os.CopyFS(copied, os.DirFS(filepath.Join("testdata", "escape"))); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(copied, "check.go")
+	before, err := os.ReadFile(source) //nolint:gosec // the test's own copy
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, logged, err := unleashIn(t, copied, "", map[string]any{configuration.UnleashOutputKey: source}); err == nil || !strings.Contains(err.Error(), "neither a settle file nor a report") {
+		t.Fatalf("%v; logged %s", err, logged)
+	}
+	if after, err := os.ReadFile(source); err != nil || !bytes.Equal(after, before) { //nolint:gosec // the test's own copy
+		t.Errorf("check.go is %q: %v", after, err)
 	}
 }
 

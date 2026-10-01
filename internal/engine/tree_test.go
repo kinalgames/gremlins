@@ -60,21 +60,27 @@ func pendingIn(t *testing.T, root string) (engine.Deferred, error) {
 	return dealer.Defer([]mutator.Mutator{mut})
 }
 
-// writtenFiles are the files a module root holds beside treeFiles: p/other.json, p/pending.json,
-// a temporary file a write left beside it, and p/report.json, in the order Defer records them.
-var writtenFiles = []string{"p/other.json", "p/pending.json", "p/pending.json.42", "p/report.json"}
+// writtenFiles are the files a module root holds beside treeFiles, in the order Defer records
+// them: p/other.json, p/pending.json, a temporary file os.CreateTemp names beside it, and its
+// neighbours that are no such file (p/pending.json.bak, p/pending.json.d/x.go), and p/report.json.
+var writtenFiles = []string{"p/other.json", "p/pending.json", "p/pending.json.42", "p/pending.json.bak", "p/pending.json.d/x.go", "p/report.json"}
+
+// trackedFiles are the files of the module whose record writtenCases check: p/a.go and
+// writtenFiles.
+var trackedFiles = append([]string{fileP}, writtenFiles...)
 
 // writtenCases are where --settle-later and -o point, relative to that module root, and which of
-// writtenFiles Defer records.
+// trackedFiles Defer records.
 var writtenCases = []struct {
 	name, later, output string
 	relative            bool
 	recorded            []string
 }{
-	{"both in the package", writtenFiles[1], writtenFiles[3], false, writtenFiles[:1]},
-	{"neither set", "", "", false, writtenFiles},
-	{"relative paths", writtenFiles[1], writtenFiles[3], true, writtenFiles},
-	{"outside the module", "../pending.json", "../p/report.json", false, writtenFiles},
+	{"both in the package", writtenFiles[1], writtenFiles[5], false, []string{fileP, writtenFiles[0], writtenFiles[3], writtenFiles[4]}},
+	{"a settle file named as a source without its extension", "p/a", "", false, trackedFiles},
+	{"neither set", "", "", false, trackedFiles},
+	{"relative paths", writtenFiles[1], writtenFiles[5], true, trackedFiles},
+	{"outside the module", "../pending.json", "../p/report.json", false, trackedFiles},
 }
 
 func TestDeferLeavesOutTheFilesTheRunsWrite(t *testing.T) {
@@ -82,7 +88,11 @@ func TestDeferLeavesOutTheFilesTheRunsWrite(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := treeRoot(t)
 			for _, name := range writtenFiles {
-				if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte(name), 0o600); err != nil {
+				file := filepath.Join(root, filepath.FromSlash(name))
+				if err := os.MkdirAll(filepath.Dir(file), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(file, []byte(name), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -101,7 +111,7 @@ func TestDeferLeavesOutTheFilesTheRunsWrite(t *testing.T) {
 			}
 			var recorded []string
 			for _, f := range got.Files {
-				if strings.HasSuffix(f.Path, ".json") || strings.HasSuffix(f.Path, ".42") {
+				if slices.Contains(trackedFiles, f.Path) {
 					recorded = append(recorded, f.Path)
 				}
 			}
