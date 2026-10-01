@@ -63,12 +63,13 @@ func TestReport(t *testing.T) {
 				stubMutant{status: mutator.NotViable, mutantType: mutator.ConditionalsBoundary, position: fakePosition},
 				stubMutant{status: mutator.TimedOut, mutantType: mutator.ConditionalsBoundary, position: fakePosition},
 				stubMutant{status: mutator.Skipped, mutantType: mutator.ConditionalsBoundary, position: fakePosition},
+				stubMutant{status: mutator.Unclassified, mutantType: mutator.ConditionalsBoundary, position: fakePosition},
 			},
 			want: "\n" +
 				// Limit the time reporting to the first two units (millis are excluded)
 				testingLine +
 				"Killed: 1, Lived: 1, Not covered: 1\n" +
-				"Timed out: 1, Not viable: 1, Skipped: 1\n" +
+				"Timed out: 1, Not viable: 1, Skipped: 1, Unclassified: 1\n" +
 				"Test efficacy: 50.00%\n" +
 				"Mutator coverage: 66.67%\n",
 		},
@@ -81,7 +82,7 @@ func TestReport(t *testing.T) {
 				// Limit the time reporting to the first two units (millis are excluded)
 				testingLine +
 				"Killed: 0, Lived: 0, Not covered: 1\n" +
-				"Timed out: 0, Not viable: 0, Skipped: 0\n" +
+				"Timed out: 0, Not viable: 0, Skipped: 0, Unclassified: 0\n" +
 				"Test efficacy: 0.00%\n" +
 				coverageLine,
 		},
@@ -95,7 +96,7 @@ func TestReport(t *testing.T) {
 				// Limit the time reporting to the first two units (millis are excluded)
 				testingLine +
 				"Killed: 0, Lived: 0, Not covered: 0\n" +
-				"Timed out: 2, Not viable: 0, Skipped: 0\n" +
+				"Timed out: 2, Not viable: 0, Skipped: 0, Unclassified: 0\n" +
 				"Test efficacy: 0.00%\n" +
 				coverageLine,
 		},
@@ -345,6 +346,7 @@ func TestReportToFile(t *testing.T) {
 		stubMutant{status: mutator.Lived, mutantType: mutator.InvertLogical, position: newPosition("file2.go", 4, 11)},
 		stubMutant{status: mutator.NotViable, mutantType: mutator.InvertNegatives, position: newPosition("file3.go", 4, 200)},
 		stubMutant{status: mutator.Killed, mutantType: mutator.RemoveSelfAssignments, position: newPosition("file3.go", 4, 100)},
+		stubMutant{status: mutator.Unclassified, mutantType: mutator.ArithmeticBase, position: newPosition("file3.go", 5, 30)},
 	}
 	data := report.Results{
 		Module:  "example.com/go/module",

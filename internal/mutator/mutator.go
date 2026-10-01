@@ -29,6 +29,12 @@ import "go/token"
 //     means the test suite is not effective in catching it.
 //   - Killed means that the TokenMutant has been tested and the tests failed, which
 //     means they are effective in covering this regression.
+//   - NotViable means that the mutated code does not build.
+//   - TimedOut means that the tests ran out of time on the TokenMutant, again when it ran
+//     alone: it counts as killed.
+//   - Unclassified means that no verdict could be reached: a time-out, a test binary ended
+//     by a signal or a failure to run that did not repeat when the TokenMutant ran alone. It
+//     never counts as killed.
 type Status int
 
 // Currently supported MutantStatus.
@@ -40,6 +46,7 @@ const (
 	Killed
 	NotViable
 	TimedOut
+	Unclassified
 )
 
 func (ms Status) String() string {
@@ -58,6 +65,8 @@ func (ms Status) String() string {
 		return "NOT VIABLE"
 	case TimedOut:
 		return "TIMED OUT"
+	case Unclassified:
+		return "UNCLASSIFIED"
 	default:
 		panic("this should not happen")
 	}

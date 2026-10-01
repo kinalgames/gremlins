@@ -2,14 +2,15 @@
   "go_module": "example.com/go/module",
   "test_efficacy": 57.14285714285714,
   "mutations_coverage": 70,
-  "mutants_total": 9,
+  "mutants_total": 10,
   "mutants_killed": 4,
   "mutants_lived": 3,
   "mutants_not_viable": 2,
   "mutants_not_covered": 3,
+  "mutants_unclassified": 1,
   "elapsed_time": 142.123,
   "mutator_statistics": {
-    "arithmetic_base": 1,
+    "arithmetic_base": 2,
     "conditionals_negation": 1,
     "conditionals_boundary": 1,
     "increment_decrement": 2,
@@ -106,6 +107,12 @@
           "column": 4,
           "type": "REMOVE_SELF_ASSIGNMENTS",
           "status": "KILLED"
+        },
+        {
+          "line": 30,
+          "column": 5,
+          "type": "ARITHMETIC_BASE",
+          "status": "UNCLASSIFIED"
         }
       ]
     }

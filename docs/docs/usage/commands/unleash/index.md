@@ -165,6 +165,7 @@ Output
 - `v` - NOT VIABLE
 - `s` - SKIPPED
 - `r` - RUNNABLE
+- `u` - UNCLASSIFIED
 
 ### Increment decrement
 
@@ -424,7 +425,8 @@ Gremlins checks the subset's verdict with every test of the package:
   `SELECTION DISAGREES WITH THE WHOLE SUITE` and runs every test for the package's remaining
   mutants.
 
-A subset's TIMED OUT and NOT VIABLE stand as they are. What these checks do not catch is a
+A subset's NOT VIABLE stands; a subset that timed out runs again alone with every test, as any
+mutant that timed out does. What these checks do not catch is a
 mutant that itself leaves state behind that makes a later selected test fail, outside the
 confirmed share: such a mutant can count as KILLED although the whole suite would let it live.
 Running the suite with `go test -shuffle=on` finds the order-dependent tests this needs.

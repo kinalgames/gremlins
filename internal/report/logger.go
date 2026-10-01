@@ -13,7 +13,7 @@ import (
 type Filter = map[mutator.Status]struct{}
 
 // ErrInvalidFilter is returned when an invalid status filter string is provided.
-var ErrInvalidFilter = errors.New("invalid statuses filter, only 'lctkvsr' letters allowed")
+var ErrInvalidFilter = errors.New("invalid statuses filter, only 'lctkvsru' letters allowed")
 
 // MutantLogger prints mutant statuses based on filter and verbosity flags.
 type MutantLogger struct {
@@ -47,7 +47,7 @@ func (l MutantLogger) Mutant(m mutator.Mutator) {
 }
 
 // ParseFilter parses a status filter string into a Filter map.
-// Valid characters are 'lctkvsr' representing different mutation statuses.
+// Valid characters are 'lctkvsru' representing different mutation statuses.
 func ParseFilter(s string) (Filter, error) {
 	if s == "" {
 		return nil, nil
@@ -71,6 +71,8 @@ func ParseFilter(s string) (Filter, error) {
 			result[mutator.Skipped] = struct{}{}
 		case 'r':
 			result[mutator.Runnable] = struct{}{}
+		case 'u':
+			result[mutator.Unclassified] = struct{}{}
 		default:
 			return nil, ErrInvalidFilter
 		}

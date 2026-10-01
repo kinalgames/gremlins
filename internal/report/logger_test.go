@@ -43,6 +43,12 @@ func Test_parseFilter(t *testing.T) {
 			},
 		},
 		{
+			filter: "u",
+			want: report.Filter{
+				mutator.Unclassified: struct{}{},
+			},
+		},
+		{
 			filter: "",
 		},
 		{

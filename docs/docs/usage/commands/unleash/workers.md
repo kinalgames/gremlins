@@ -15,7 +15,9 @@ doesn't enforce this by default.
 A rule of thumb may be setting it so that the sum of _workers_ and _test CPU_ is equal to the total number of cores of
 of the machine.
 
-The symptom of a run excessively stressed is the number of mutants going into `TIMED OUT`. You should tweak the two
+A mutant that timed out runs again alone once every other mutant has run, and is `TIMED OUT` only if it times out
+again; otherwise it takes the verdict of its run alone, or `UNCLASSIFIED`. The symptom of a run excessively stressed
+is the number of mutants that time out, and with them the time the runs alone add. You should tweak the two
 values above until your runs stabilize on a low and constant number of `TIMED OUT` mutants. To understand what could be
 your correct value, you can run Gremlins with a single worker and see the results.
 

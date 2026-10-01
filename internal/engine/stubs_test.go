@@ -137,7 +137,8 @@ type mutantStub struct {
 	applyCalled    bool
 	rollbackCalled bool
 
-	hasApplyError bool
+	hasApplyError    bool
+	hasRollbackError bool
 }
 
 func (m *mutantStub) Type() mutator.Type {
@@ -187,6 +188,9 @@ func (m *mutantStub) Apply() error {
 
 func (m *mutantStub) Rollback() error {
 	m.rollbackCalled = true
+	if m.hasRollbackError {
+		return errors.New("test error")
+	}
 
 	return nil
 }

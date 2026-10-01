@@ -92,3 +92,29 @@ func TestTestSelectionKeepsTheWholeSuitesVerdicts(t *testing.T) {
 		})
 	}
 }
+
+func TestAMutantThatDoesNotBuildIsNotViable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs gremlins with the go command")
+	}
+	t.Setenv("GOWORK", "off")
+	t.Setenv("GOFLAGS", "-mod=mod")
+	dir := filepath.Join(t.TempDir(), "unbuilt")
+	if err := os.CopyFS(dir, os.DirFS(filepath.Join("testdata", "unbuilt"))); err != nil {
+		t.Fatal(err)
+	}
+	mod, err := gomodule.Init(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(".") // the coverage run changes to the module's directory
+	t.Cleanup(configuration.Reset)
+	configuration.Set(configuration.MutantTypeEnabledKey(mutator.ArithmeticBase), true)
+	results, err := run(context.Background(), mod, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results.Mutants) != 1 || results.Mutants[0].Status() != mutator.NotViable {
+		t.Fatalf("mutants %v", results.Mutants)
+	}
+}

@@ -61,6 +61,7 @@ type MutantExecutorDealer struct {
 	buildTags         string
 	testExecutionTime time.Duration
 	selector          *selection.Selector
+	firsts            *firsts
 	dryRun            bool
 	integrationMode   bool
 	testCPU           int
@@ -115,6 +116,7 @@ func NewExecutorDealer(mod gomodule.GoModule, wdd workdir.Dealer, elapsed time.D
 		testCPU:           testCPU,
 		testExecutionTime: elapsed * time.Duration(coefficient),
 		execContext:       exec.CommandContext,
+		firsts:            &firsts{of: map[mutator.Mutator]outcome{}},
 	}
 
 	for _, opt := range opts {
@@ -155,7 +157,12 @@ func newSelector(ec execContext, mod gomodule.GoModule, wdd workdir.Dealer, buil
 // will stream the results of the executor, and the wait group will be done when the
 // executor is complete.
 func (m MutantExecutorDealer) NewExecutor(mut mutator.Mutator, outCh chan<- mutator.Mutator, wg *sync.WaitGroup) workerpool.Executor {
-	mj := mutantExecutor{
+	return m.executor(mut, outCh, wg)
+}
+
+// executor is the mutantExecutor of mut.
+func (m MutantExecutorDealer) executor(mut mutator.Mutator, outCh chan<- mutator.Mutator, wg *sync.WaitGroup) *mutantExecutor {
+	return &mutantExecutor{
 		mutant:            mut,
 		outCh:             outCh,
 		wg:                wg,
@@ -168,9 +175,8 @@ func (m MutantExecutorDealer) NewExecutor(mut mutator.Mutator, outCh chan<- muta
 		testCPU:           m.testCPU,
 		testExecutionTime: m.testExecutionTime,
 		selector:          m.selector,
+		firsts:            m.firsts,
 	}
-
-	return &mj
 }
 
 type execContext = func(ctx context.Context, name string, args ...string) *exec.Cmd
@@ -185,6 +191,7 @@ type mutantExecutor struct {
 	buildTags         string
 	testExecutionTime time.Duration
 	selector          *selection.Selector
+	firsts            *firsts
 	dryRun            bool
 	integrationMode   bool
 	testCPU           int
@@ -199,18 +206,11 @@ type mutantExecutor struct {
 // will be LIVED, if the tests fail, the TokenMutator will be KILLED.
 // The timeout of the test is managed outside the run of the test, using
 // a context with timeout. This is done because the Go test command doesn't
-// make it easy to distinguish failures from timeouts.
+// make it easy to distinguish failures from timeouts. A run that timed out,
+// crashed or could not be carried out is recorded to run again alone (AloneRunner).
 func (m *mutantExecutor) Start(w *workerpool.Worker) {
 	defer m.wg.Done()
-	workerName := fmt.Sprintf("%s-%d", w.Name, w.ID)
-	rootDir, err := m.wdDealer.Get(workerName)
-	if err != nil {
-		log.Errorf("failed to get working directory for worker %s: %v", workerName, err)
-		panic(fmt.Sprintf("failed to get working directory for worker %s: %v", workerName, err))
-	}
-
-	workingDir := filepath.Join(rootDir, m.module.CallingDir)
-	m.mutant.SetWorkdir(workingDir)
+	rootDir := m.workdir(fmt.Sprintf("%s-%d", w.Name, w.ID))
 
 	if m.mutant.Status() == mutator.NotCovered || m.mutant.Status() == mutator.Skipped || m.dryRun {
 		m.outCh <- m.mutant
@@ -218,65 +218,87 @@ func (m *mutantExecutor) Start(w *workerpool.Worker) {
 		return
 	}
 
+	o := m.test(func() outcome { return m.runTests(rootDir, m.mutant.Pkg()) })
+	if o.again() {
+		m.firsts.put(m.mutant, o)
+	}
+	m.mutant.SetStatus(o.status())
+	m.outCh <- m.mutant
+}
+
+// workdir is the root of the copy of the module the work directory name holds, where the mutant
+// is applied.
+func (m *mutantExecutor) workdir(name string) string {
+	rootDir, err := m.wdDealer.Get(name)
+	if err != nil {
+		log.Errorf("failed to get working directory for worker %s: %v", name, err)
+		panic(fmt.Sprintf("failed to get working directory for worker %s: %v", name, err))
+	}
+	m.mutant.SetWorkdir(filepath.Join(rootDir, m.module.CallingDir))
+
+	return rootDir
+}
+
+// test applies the mutant, runs run on it and restores the code. A mutant that cannot be applied
+// ends broken.
+func (m *mutantExecutor) test(run func() outcome) outcome {
 	if err := m.mutant.Apply(); err != nil {
 		log.Errorf("failed to apply mutation at %s - %s\n\t%v", m.mutant.Position(), m.mutant.Status(), err)
 
-		return
+		return broken
 	}
-
-	m.mutant.SetStatus(m.runTests(rootDir, m.mutant.Pkg()))
-
+	o := run()
 	if err := m.mutant.Rollback(); err != nil {
-		// What should we do now?
 		log.Errorf("failed to restore mutation at %s - %s\n\t%v", m.mutant.Position(), m.mutant.Status(), err)
 	}
 
-	m.outCh <- m.mutant
+	return o
 }
 
 // runTests runs the mutant's tests: the subset the selection chooses, its verdict confirmed where
 // a subset can differ from the whole suite (confirm), or else every test of the package.
-func (m *mutantExecutor) runTests(rootDir, pkg string) mutator.Status {
+func (m *mutantExecutor) runTests(rootDir, pkg string) outcome {
 	// The selection waits for the package's index before the mutant's time starts.
 	pattern := m.selectedTests(pkg)
-	status := m.runSuite(rootDir, pkg, pattern)
+	o := m.runSuite(rootDir, pkg, pattern)
 	if pattern == "" {
-		return status
+		return o
 	}
 
-	return m.confirm(rootDir, pkg, pattern, status)
+	return m.confirm(rootDir, pkg, pattern, o)
 }
 
 // confirm is the verdict of a subset run, status, once checked against the whole suite where the
 // two can differ: a survivor, since a test that kills it may have been left out or need the tests
 // before it; a kill by a subset that fails on the unmutated code too; and a sample of the other
 // kills (selection.Selector.Sampled), any disagreement of which makes the package's later mutants
-// run every test. A subset's time-out or build failure is its verdict.
-func (m *mutantExecutor) confirm(rootDir, pkg, pattern string, status mutator.Status) mutator.Status {
-	if status == mutator.Lived {
+// run every test. A subset's other outcomes stand: a time-out, a crash or a run that could not be
+// carried out runs again alone, with every test.
+func (m *mutantExecutor) confirm(rootDir, pkg, pattern string, o outcome) outcome {
+	if o == passed {
 		return m.runSuite(rootDir, pkg, "")
 	}
-	if status != mutator.Killed {
-		return status
+	if o != failed {
+		return o
 	}
 	if !m.selector.Passes(pkg, pattern) {
 		return m.runSuite(rootDir, pkg, "")
 	}
 	pos := m.mutant.Position()
 	if !m.selector.Sampled(pkg, fmt.Sprintf("%s:%d:%d %s", pos.Filename, pos.Line, pos.Column, m.mutant.Type())) {
-		return status
+		return o
 	}
 	full := m.runSuite(rootDir, pkg, "")
-	if full != mutator.Killed {
-		m.selector.Disable(pkg, fmt.Errorf("the tests %s killed the mutant %s at %s, every test let it end %s", pattern, m.mutant.Type(), pos, full))
+	if full != failed {
+		m.selector.Disable(pkg, fmt.Errorf("the tests %s killed the mutant %s at %s, every test let it end %s", pattern, m.mutant.Type(), pos, full.status()))
 	}
 
 	return full
 }
 
 // runSuite runs the tests of pkg that pattern selects (every test for "") on the mutant, within
-// the mutant's time.
-func (m *mutantExecutor) runSuite(rootDir, pkg, pattern string) mutator.Status {
+// the mutant's time, and reads how the run ended from its output's end.
+func (m *mutantExecutor) runSuite(rootDir, pkg, pattern string) outcome {
 	ctx, cancel := context.WithTimeout(context.Background(), m.testExecutionTime)
 	defer cancel()
 
@@ -287,19 +309,13 @@ func (m *mutantExecutor) runSuite(rootDir, pkg, pattern string) mutator.Status {
 	}
 	cmd.Env = append(cmd.Env, os.Environ()...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("GOTMPDIR=%s", m.wdDealer.WorkDir()))
+	output := &tail{}
+	cmd.Stdout, cmd.Stderr = output, output
 
 	rel, err := run(cmd)
 	defer rel()
 
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return mutator.TimedOut
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return getTestFailedStatus(exitErr.ExitCode())
-	}
-
-	return mutator.Lived
+	return classify(errors.Is(ctx.Err(), context.DeadlineExceeded), exitCode(err), output.buf)
 }
 
 // selectedTests is the -run pattern of the tests of pkg that cover the mutant's position, or ""
@@ -351,15 +367,4 @@ func run(cmd *exec.Cmd) (func(), error) {
 			_ = cmd.Process.Kill()
 		}
 	}, nil
-}
-
-func getTestFailedStatus(exitCode int) mutator.Status {
-	switch exitCode {
-	case 1:
-		return mutator.Killed
-	case 2:
-		return mutator.NotViable
-	default:
-		return mutator.Lived
-	}
 }
