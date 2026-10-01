@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -393,20 +395,18 @@ func TestCPU(t *testing.T) {
 			executor.Start(w)
 			wg.Wait()
 
-			for _, arg := range holder.args {
-				if !tc.cpuPresent && strings.Contains(arg, "-cpu") {
-					t.Fatalf("didn't expect to have -cpu flag")
+			// -cpu and its count are two arguments of go test: one argument "-cpu 1" is a flag
+			// the test binary does not define, and every mutant would fail as KILLED.
+			i := slices.Index(holder.args, "-cpu")
+			if !tc.cpuPresent {
+				if i >= 0 || slices.ContainsFunc(holder.args, func(a string) bool { return strings.HasPrefix(a, "-cpu") }) {
+					t.Fatalf("didn't expect a -cpu flag, got args %q", holder.args)
 				}
-				if !tc.cpuPresent {
-					return
-				}
-				got := fmt.Sprintf("go %v", strings.Join(holder.args, " "))
-				cpuFlag := fmt.Sprintf("-cpu %d", tc.wantTestCPU)
-				if strings.Contains(got, cpuFlag) {
-					// PASS
-					return
-				}
-				t.Fatalf("want flag %q, got args %s", cpuFlag, holder.args)
+
+				return
+			}
+			if i < 0 || i+1 >= len(holder.args) || holder.args[i+1] != strconv.Itoa(tc.wantTestCPU) {
+				t.Fatalf("want -cpu %d as two arguments, got args %q", tc.wantTestCPU, holder.args)
 			}
 
 		})

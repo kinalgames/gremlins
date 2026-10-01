@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -276,7 +277,7 @@ func (m *mutantExecutor) getTestArgs(pkg, run string) []string {
 	args = append(args, "-failfast")
 
 	if m.testCPU != 0 {
-		args = append(args, fmt.Sprintf("-cpu %d", m.testCPU))
+		args = append(args, "-cpu", strconv.Itoa(m.testCPU))
 	}
 	if run != "" {
 		args = append(args, "-run", run)
