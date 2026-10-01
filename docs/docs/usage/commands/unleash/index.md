@@ -102,7 +102,10 @@ gremlins unleash --extra-mutants mutants.txt ./pkg
 Each is an `EXTRA` mutant: it runs with its package's tests, under the same verdicts, runs
 alone and settles later as every other mutant does. It runs whatever the coverage, the diff and
 the excluded files say, since the list chose it. A line of another shape, or an `original` that
-does not occur exactly once in its file, fails the run before any test runs.
+does not occur exactly once in its file, fails the run before any test runs. Its verdict line names
+the list's line, so that two mutants of one `original` can be told apart
+(`LIVED EXTRA at limits.go:9:2 (line 2 of the extra mutants)`), and so does its JSON entry
+(`list_line`).
 
 ### Diff
 

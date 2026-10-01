@@ -127,7 +127,8 @@
           "line": 50,
           "column": 7,
           "type": "EXTRA",
-          "status": "NOT VIABLE"
+          "status": "NOT VIABLE",
+          "list_line": 4
         }
       ]
     }

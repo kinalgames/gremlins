@@ -111,14 +111,18 @@ func TestDeferRecordsTheSettingsThatChangeAVerdict(t *testing.T) {
 func TestDeferNamesAnExtraMutantByItsTextsAndEachFileOnce(t *testing.T) {
 	root := sumRoot(t)
 	mod := gomodule.GoModule{Name: pkgP, Root: root, CallingDir: "."}
-	plus, err := engine.NewTextMutant(mod, fileA, plusAB, "a - b")
+	list := filepath.Join(t.TempDir(), "mutants.txt")
+	if err := os.WriteFile(list, []byte("\na.go|a + b|a - b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	extras, err := engine.ReadExtraMutants(list, mod)
 	if err != nil {
 		t.Fatal(err)
 	}
 	dealer, _ := aloneDealerIn(t, root, &sequence{}, "")
-	got, err := dealer.Defer([]mutator.Mutator{mutantAt(mutator.Runnable, 8), plus})
+	got, err := dealer.Defer(append([]mutator.Mutator{mutantAt(mutator.Runnable, 8)}, extras...))
 	want := []engine.DeferredMutant{
-		{File: fileA, Line: 4, Column: 9, Type: extraType, Pkg: pkgP, Original: plusAB, Mutated: "a - b"},
+		{File: fileA, Line: 4, Column: 9, Type: extraType, Pkg: pkgP, Original: plusAB, Mutated: "a - b", ListLine: 2},
 		{File: fileA, Line: 8, Column: 2, Type: boundary, Pkg: pkgP},
 	}
 	if err != nil || !reflect.DeepEqual(got.Mutants, want) || !reflect.DeepEqual(got.Files, []engine.DeferredFile{{Path: fileA, SHA256: sumDigest}}) {
@@ -225,10 +229,13 @@ func TestResumeWithoutASelectorStillConfirmsAKill(t *testing.T) {
 func TestResumeSettlesAnExtraMutantInItsCopy(t *testing.T) {
 	// The crash repeats alone and the unmutated code passes.
 	seq := &sequence{runs: []execContext{crashedBinary, fakeExecCommandSuccess}}
-	d := deferredOf(engine.DeferredMutant{File: fileA, Line: 4, Column: 9, Type: extraType, Pkg: pkgP, Original: plusAB, Mutated: timesAB, First: crashedRun})
+	d := deferredOf(engine.DeferredMutant{File: fileA, Line: 4, Column: 9, Type: extraType, Pkg: pkgP, Original: plusAB, Mutated: timesAB, ListLine: 7, First: crashedRun})
 	muts, err := resumeDealer(t, seq, nil).Resume(context.Background(), d)
 	if err != nil || len(muts) != 1 || muts[0].Status() != mutator.Killed || muts[0].Type() != mutator.Extra || len(seq.all()) != 2 {
 		t.Fatalf("%v after %v: %v", muts, seq.all(), err)
+	}
+	if tm, ok := muts[0].(*engine.TextMutator); !ok || tm.ListLine() != 7 {
+		t.Errorf("%#v, want the list's line 7", muts[0])
 	}
 }
 

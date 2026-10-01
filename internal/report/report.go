@@ -88,10 +88,11 @@ func newReport(results Results) (*reportStatus, bool) {
 	rep.files = make(map[string][]internal.Mutation)
 	for _, m := range results.Mutants {
 		rep.files[m.Position().Filename] = append(rep.files[m.Position().Filename], internal.Mutation{
-			Line:   m.Position().Line,
-			Column: m.Position().Column,
-			Type:   m.Type().String(),
-			Status: m.Status().String(),
+			Line:     m.Position().Line,
+			Column:   m.Position().Column,
+			Type:     m.Type().String(),
+			Status:   m.Status().String(),
+			ListLine: listLine(m),
 		})
 
 		reportMutationStatus(m, rep)
@@ -305,7 +306,22 @@ func Mutant(m mutator.Mutator) {
 	case mutator.NotViable, mutator.Skipped:
 		status = fgHiBlack(m.Status())
 	}
+	if line := listLine(m); line > 0 {
+		log.Infof("%s%s %s at %s (line %d of the extra mutants)\n", padding(m.Status()), status, m.Type(), m.Position(), line)
+
+		return
+	}
 	log.Infof("%s%s %s at %s\n", padding(m.Status()), status, m.Type(), m.Position())
+}
+
+// listLine is the line of the --extra-mutants list that wrote m, so that two mutants of one
+// position can be told apart, or 0 for a mutant Gremlins found.
+func listLine(m mutator.Mutator) int {
+	if l, ok := m.(interface{ ListLine() int }); ok {
+		return l.ListLine()
+	}
+
+	return 0
 }
 
 func padding(s mutator.Status) string {

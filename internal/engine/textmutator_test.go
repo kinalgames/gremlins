@@ -186,6 +186,9 @@ func TestExtraMutantsAreReadOnePerLine(t *testing.T) {
 	if first.Position().Line != 3 || first.Mutated() != "const Limit = 11" || second.Position().Line != 7 || second.Mutated() != "n < Limit|x" {
 		t.Errorf("%v %q, %v %q", first.Position(), first.Mutated(), second.Position(), second.Mutated())
 	}
+	if first.ListLine() != 1 || second.ListLine() != 3 {
+		t.Errorf("from lines %d and %d of the list, want 1 and 3", first.ListLine(), second.ListLine())
+	}
 }
 
 func TestExtraMutantsMustEachBeOneMutantOfTheModule(t *testing.T) {

@@ -47,6 +47,8 @@ type Mutation struct {
 	Status string `json:"status"`
 	Line   int    `json:"line"`
 	Column int    `json:"column"`
+	// ListLine is the line of the --extra-mutants list that wrote the mutant, absent for the rest.
+	ListLine int `json:"list_line,omitempty"`
 }
 
 // MutatorType contains the list of all supported mutator types.

@@ -39,6 +39,7 @@ type TextMutator struct {
 	position token.Position
 	original []byte
 	mutated  []byte
+	listLine int
 	workDir  string
 	origFile []byte
 	status   mutator.Status
@@ -129,6 +130,7 @@ func ReadExtraMutants(path string, mod gomodule.GoModule) ([]mutator.Mutator, er
 		if err != nil {
 			return nil, fmt.Errorf("%s:%d: %w", path, i+1, err)
 		}
+		mut.listLine = i + 1
 		muts = append(muts, mut)
 	}
 
@@ -166,6 +168,12 @@ func (*TextMutator) Pos() token.Pos {
 // Pkg returns the import path of the mutant's package.
 func (m *TextMutator) Pkg() string {
 	return m.pkg
+}
+
+// ListLine is the line of the --extra-mutants list that wrote the mutant (ReadExtraMutants), or 0
+// for one made otherwise: two mutants of one position differ in it.
+func (m *TextMutator) ListLine() int {
+	return m.listLine
 }
 
 // Original is the text the mutant replaces.

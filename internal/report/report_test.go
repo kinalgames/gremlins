@@ -328,6 +328,7 @@ func TestMutantLog(t *testing.T) {
 	report.Mutant(m)
 	m = stubMutant{status: mutator.Skipped, mutantType: mutator.ConditionalsBoundary, position: fakePosition}
 	report.Mutant(m)
+	report.Mutant(listedStub{stubMutant{status: mutator.Lived, mutantType: mutator.Extra, position: fakePosition}, 7})
 
 	got := out.String()
 
@@ -338,7 +339,8 @@ func TestMutantLog(t *testing.T) {
 		"    RUNNABLE CONDITIONALS_BOUNDARY at aFolder/aFile.go:12:3\n" +
 		"  NOT VIABLE CONDITIONALS_BOUNDARY at aFolder/aFile.go:12:3\n" +
 		"   TIMED OUT CONDITIONALS_BOUNDARY at aFolder/aFile.go:12:3\n" +
-		"     SKIPPED CONDITIONALS_BOUNDARY at aFolder/aFile.go:12:3\n"
+		"     SKIPPED CONDITIONALS_BOUNDARY at aFolder/aFile.go:12:3\n" +
+		"       LIVED EXTRA at aFolder/aFile.go:12:3 (line 7 of the extra mutants)\n"
 
 	if !cmp.Equal(got, want) {
 		t.Error(cmp.Diff(got, want))
@@ -362,7 +364,7 @@ func TestReportToFile(t *testing.T) {
 		stubMutant{status: mutator.Killed, mutantType: mutator.RemoveSelfAssignments, position: newPosition("file3.go", 4, 100)},
 		stubMutant{status: mutator.Unclassified, mutantType: mutator.ArithmeticBase, position: newPosition("file3.go", 5, 30)},
 		stubMutant{status: mutator.TimedOut, mutantType: mutator.ArithmeticBase, position: newPosition("file3.go", 6, 40)},
-		stubMutant{status: mutator.NotViable, mutantType: mutator.Extra, position: newPosition("file3.go", 7, 50)},
+		listedStub{stubMutant{status: mutator.NotViable, mutantType: mutator.Extra, position: newPosition("file3.go", 7, 50)}, 4},
 	}
 	data := report.Results{
 		Module:  "example.com/go/module",
@@ -464,6 +466,14 @@ func sortMutation(x, y internal.Mutation) bool {
 
 	return x.Line < y.Line
 }
+
+// listedStub is a stubMutant an --extra-mutants list wrote on its line.
+type listedStub struct {
+	stubMutant
+	line int
+}
+
+func (s listedStub) ListLine() int { return s.line }
 
 type stubMutant struct {
 	position   token.Position

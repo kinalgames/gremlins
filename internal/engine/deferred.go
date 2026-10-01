@@ -69,8 +69,8 @@ type DeferredFile struct {
 }
 
 // DeferredMutant is a pending mutant: its position (the file named from the calling directory),
-// its type and package; for a mutator.Extra, the text it replaces and the text it puts in its
-// place; First, for a mutant that runs again alone, how its first run ended; Kill for a subset
+// its type and package; for a mutator.Extra, the text it replaces, the text it puts in its place
+// and the line of the list that wrote it; First, for a mutant that runs again alone, how its first run ended; Kill for a subset
 // kill the whole suite has not confirmed, and Confirm for one Settle confirms before any other
 // mutant.
 type DeferredMutant struct {
@@ -81,6 +81,7 @@ type DeferredMutant struct {
 	Pkg      string `json:"pkg"`
 	Original string `json:"original,omitempty"`
 	Mutated  string `json:"mutated,omitempty"`
+	ListLine int    `json:"list_line,omitempty"`
 	First    string `json:"first,omitempty"`
 	Kill     bool   `json:"kill,omitempty"`
 	Confirm  bool   `json:"confirm,omitempty"`
@@ -125,7 +126,7 @@ func deferredMutant(mut mutator.Mutator) DeferredMutant {
 	pos := mut.Position()
 	dm := DeferredMutant{File: filepath.ToSlash(pos.Filename), Line: pos.Line, Column: pos.Column, Type: mut.Type().String(), Pkg: mut.Pkg()}
 	if tm, ok := mut.(*TextMutator); ok {
-		dm.Original, dm.Mutated = tm.Original(), tm.Mutated()
+		dm.Original, dm.Mutated, dm.ListLine = tm.Original(), tm.Mutated(), tm.ListLine()
 	}
 
 	return dm
@@ -332,6 +333,7 @@ func (m *MutantExecutorDealer) findText(src []byte, dm DeferredMutant) (mutator.
 	if pos := tm.Position(); pos.Line != dm.Line || pos.Column != dm.Column {
 		return nil, fmt.Errorf("no %s mutant at %s:%d:%d", dm.Type, dm.File, dm.Line, dm.Column)
 	}
+	tm.listLine = dm.ListLine
 
 	return tm, nil
 }
