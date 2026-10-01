@@ -9,6 +9,7 @@
   "mutants_not_covered": 3,
   "mutants_unclassified": 1,
   "mutants_pending": 2,
+  "mutants_not_viable_extra": 1,
   "elapsed_time": 142.123,
   "mutator_statistics": {
     "arithmetic_base": 3,

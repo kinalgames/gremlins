@@ -65,6 +65,9 @@ type reportStatus struct {
 	runnable     int
 	unclassified int
 	pending      int
+	// notViableExtra counts the NOT VIABLE mutants of type mutator.Extra, which notViable counts
+	// too: a mutant the user wrote that does not build tests nothing.
+	notViableExtra int
 
 	mutatorStatistics internal.MutatorType
 
@@ -123,6 +126,9 @@ func reportMutationStatus(m mutator.Mutator, rep *reportStatus) {
 		rep.timedOut++
 	case mutator.NotViable:
 		rep.notViable++
+		if m.Type() == mutator.Extra {
+			rep.notViableExtra++
+		}
 	case mutator.Runnable:
 		rep.runnable++
 	case mutator.Unclassified:
@@ -182,19 +188,20 @@ func (r *reportStatus) fileReport() {
 		}
 
 		result := internal.OutputResult{
-			GoModule:            r.module,
-			TestEfficacy:        r.tEfficacy,
-			MutationsCoverage:   r.mCovered,
-			MutantsTotal:        r.lived + r.killed + r.timedOut + r.notViable + r.unclassified,
-			MutantsKilled:       r.killed,
-			MutantsLived:        r.lived,
-			MutantsNotViable:    r.notViable,
-			MutantsNotCovered:   r.notCovered,
-			MutantsUnclassified: r.unclassified,
-			MutantsPending:      r.pending,
-			ElapsedTime:         r.elapsed.Duration().Seconds(),
-			MutatorStatistics:   r.mutatorStatistics,
-			Files:               files,
+			GoModule:              r.module,
+			TestEfficacy:          r.tEfficacy,
+			MutationsCoverage:     r.mCovered,
+			MutantsTotal:          r.lived + r.killed + r.timedOut + r.notViable + r.unclassified,
+			MutantsKilled:         r.killed,
+			MutantsLived:          r.lived,
+			MutantsNotViable:      r.notViable,
+			MutantsNotCovered:     r.notCovered,
+			MutantsUnclassified:   r.unclassified,
+			MutantsPending:        r.pending,
+			MutantsNotViableExtra: r.notViableExtra,
+			ElapsedTime:           r.elapsed.Duration().Seconds(),
+			MutatorStatistics:     r.mutatorStatistics,
+			Files:                 files,
 		}
 
 		jsonResult, _ := json.Marshal(result)
@@ -231,10 +238,11 @@ func (r *reportStatus) fullRunReport() {
 	notCovered := fgHiYellow(r.notCovered)
 	unclassified := fgRed(r.unclassified)
 	pending := fgHiYellow(r.pending)
+	notViableExtra := fgRed(r.notViableExtra)
 	log.Infoln("")
 	log.Infof("Mutation testing completed in %s\n", r.elapsed.String())
 	log.Infof("Killed: %s, Lived: %s, Not covered: %s\n", killed, lived, notCovered)
-	log.Infof("Timed out: %s, Not viable: %s, Skipped: %s, Unclassified: %s, Pending: %s\n", timedOut, notViable, skipped, unclassified, pending)
+	log.Infof("Timed out: %s, Not viable: %s, Skipped: %s, Unclassified: %s, Pending: %s, Not viable extra: %s\n", timedOut, notViable, skipped, unclassified, pending, notViableExtra)
 	log.Infof("Test efficacy: %.2f%%\n", r.tEfficacy)
 	log.Infof("Mutator coverage: %.2f%%\n", r.mCovered)
 }

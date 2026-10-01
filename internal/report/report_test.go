@@ -65,12 +65,13 @@ func TestReport(t *testing.T) {
 				stubMutant{status: mutator.TimedOut, mutantType: mutator.ConditionalsBoundary, position: fakePosition},
 				stubMutant{status: mutator.Skipped, mutantType: mutator.ConditionalsBoundary, position: fakePosition},
 				stubMutant{status: mutator.Unclassified, mutantType: mutator.ConditionalsBoundary, position: fakePosition},
+				stubMutant{status: mutator.NotViable, mutantType: mutator.Extra, position: fakePosition},
 			},
 			want: "\n" +
 				// Limit the time reporting to the first two units (millis are excluded)
 				testingLine +
 				"Killed: 1, Lived: 1, Not covered: 1\n" +
-				"Timed out: 1, Not viable: 1, Skipped: 1, Unclassified: 1, Pending: 0\n" +
+				"Timed out: 1, Not viable: 2, Skipped: 1, Unclassified: 1, Pending: 0, Not viable extra: 1\n" +
 				"Test efficacy: 33.33%\n" +
 				"Mutator coverage: 66.67%\n",
 		},
@@ -83,7 +84,7 @@ func TestReport(t *testing.T) {
 				// Limit the time reporting to the first two units (millis are excluded)
 				testingLine +
 				"Killed: 0, Lived: 0, Not covered: 1\n" +
-				"Timed out: 0, Not viable: 0, Skipped: 0, Unclassified: 0, Pending: 0\n" +
+				"Timed out: 0, Not viable: 0, Skipped: 0, Unclassified: 0, Pending: 0, Not viable extra: 0\n" +
 				"Test efficacy: 0.00%\n" +
 				coverageLine,
 		},
@@ -97,7 +98,7 @@ func TestReport(t *testing.T) {
 				// Limit the time reporting to the first two units (millis are excluded)
 				testingLine +
 				"Killed: 0, Lived: 0, Not covered: 0\n" +
-				"Timed out: 2, Not viable: 0, Skipped: 0, Unclassified: 0, Pending: 0\n" +
+				"Timed out: 2, Not viable: 0, Skipped: 0, Unclassified: 0, Pending: 0, Not viable extra: 0\n" +
 				"Test efficacy: 0.00%\n" +
 				coverageLine,
 		},
@@ -114,7 +115,7 @@ func TestReport(t *testing.T) {
 			want: "\n" +
 				testingLine +
 				"Killed: 0, Lived: 0, Not covered: 0\n" +
-				"Timed out: 0, Not viable: 0, Skipped: 0, Unclassified: 0, Pending: 2\n" +
+				"Timed out: 0, Not viable: 0, Skipped: 0, Unclassified: 0, Pending: 2, Not viable extra: 0\n" +
 				"Test efficacy: 0.00%\n" +
 				coverageLine,
 		},

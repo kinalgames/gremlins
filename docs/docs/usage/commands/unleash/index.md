@@ -311,6 +311,8 @@ The output file in JSON format and has the following structure:
   "mutants_unclassified": 0,
   "mutants_pending": 0,
   //(5)
+  "mutants_not_viable_extra": 0,
+  //(6)
   "elapsed_time": 123.456,
   //(4)
   "files": [
@@ -337,6 +339,8 @@ The output file in JSON format and has the following structure:
 4. The elapsed time is expressed in seconds, expressed as floating point number.
 5. Pending mutants are those a run with `--settle-later` left for a later run; they are not in the
    other counts.
+6. The NOT VIABLE mutants of `--extra-mutants`, which `mutants_not_viable` counts too: a mutant you
+   wrote that does not build tests nothing. The summary prints it as `Not viable extra`.
 
 [//]: # (@formatter:off)
 !!! warning
