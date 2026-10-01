@@ -141,8 +141,11 @@ func (c *Coverage) downloadModules() error {
 	return cmd.Run()
 }
 
+// executeCoverage runs the tests with coverage, never from Go's test result cache: the time it
+// takes is the baseline every mutant's timeout multiplies, and a cached result takes
+// milliseconds.
 func (c *Coverage) executeCoverage() (time.Duration, error) {
-	args := []string{"test"}
+	args := []string{"test", "-count=1"}
 	if c.buildTags != "" {
 		args = append(args, "-tags", c.buildTags)
 	}
