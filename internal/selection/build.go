@@ -41,20 +41,29 @@ type ExecContext = func(ctx context.Context, name string, args ...string) *exec.
 
 // GoBuilder indexes a package's tests with the go command: it builds the package's test binary
 // with coverage, lists its tests, examples and fuzz targets, and runs each alone, in the
-// package's directory of the module, Parallelism at a time.
+// package's directory of a copy of the module (Tree), Parallelism at a time.
 type GoBuilder struct {
 	Exec        ExecContext
 	Module      gomodule.GoModule
-	WorkDir     string        // where the binaries and profiles go
-	Tags        string        // the build tags of the test binary
-	Parallelism int           // how many tests run at once
-	Timeout     time.Duration // how long one test's run may take
+	Tree        func() (string, error) // the root of the copy of the module the tests run in
+	WorkDir     string                 // where the binaries and profiles go
+	Tags        string                 // the build tags of the test binary
+	Parallelism int                    // how many tests run at once
+	Timeout     time.Duration          // how long one test's run may take
 }
+
+// waitDelay bounds how long a command's output is awaited after it ends or is stopped: a child it
+// left running would otherwise hold the output open, past the timeout.
+const waitDelay = 5 * time.Second
 
 // Index indexes the tests of the package pkg, a package of the module. A package without tests
 // has an empty index.
 func (b GoBuilder) Index(pkg string) (Index, error) {
-	dir := filepath.Join(b.Module.Root, filepath.FromSlash(strings.TrimPrefix(strings.TrimPrefix(pkg, b.Module.Name), "/")))
+	root, err := b.Tree()
+	if err != nil {
+		return Index{}, err
+	}
+	dir := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(strings.TrimPrefix(pkg, b.Module.Name), "/")))
 	out, err := os.MkdirTemp(b.WorkDir, "selection-")
 	if err != nil {
 		return Index{}, err
@@ -83,19 +92,27 @@ func (b GoBuilder) Index(pkg string) (Index, error) {
 		return Index{}, err
 	}
 
-	return Index{Tests: tests, Profiles: profiles}, nil
+	return Index{Tests: tests, Profiles: profiles, Binary: bin, Dir: dir}, nil
+}
+
+// Passes runs the tests pattern selects in the index's unmutated binary; nil when they pass.
+func (b GoBuilder) Passes(ix Index, pattern string) error {
+	_, err := b.run(ix.Dir, ix.Binary, "-test.run", pattern)
+
+	return err
 }
 
 // runnable is a name -test.list prints that -test.run runs: a test, an example or a fuzz target
-// (whose seed corpus runs as a test), not a benchmark.
-var runnable = regexp.MustCompile(`^(Test|Example|Fuzz)`)
+// (whose seed corpus runs as a test), not a benchmark; a whole Go identifier, so that a line
+// TestMain prints is not taken for a test.
+var runnable = regexp.MustCompile(`^(Test|Example|Fuzz)[\p{L}\p{N}_]*$`)
 
 // testNames are the runnable names of the output of -test.list.
 func testNames(listed []byte) []string {
 	var names []string
 	for _, line := range strings.Split(string(listed), "\n") {
-		if name := strings.TrimSpace(line); runnable.MatchString(name) {
-			names = append(names, name)
+		if runnable.MatchString(line) {
+			names = append(names, line)
 		}
 	}
 
@@ -146,6 +163,7 @@ func (b GoBuilder) run(dir, name string, args ...string) ([]byte, error) {
 	defer cancel()
 	cmd := b.Exec(ctx, name, args...)
 	cmd.Dir = dir
+	cmd.WaitDelay = waitDelay
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

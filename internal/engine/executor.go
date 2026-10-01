@@ -121,26 +121,32 @@ func NewExecutorDealer(mod gomodule.GoModule, wdd workdir.Dealer, elapsed time.D
 		jd = opt(jd)
 	}
 	if jd.selector == nil && configuration.Get[bool](configuration.UnleashTestSelectionKey) && !integrationMode {
-		jd.selector = newSelector(jd.execContext, mod, wdd.WorkDir(), buildTags, jd.testExecutionTime)
+		jd.selector = newSelector(jd.execContext, mod, wdd, buildTags, jd.testExecutionTime)
 	}
 
 	return &jd
 }
 
+// selectionTree is the work directory of the copy of the module the selection's tests run in,
+// never the source: the workers copy the source while the first packages are indexed.
+const selectionTree = "test-selection"
+
 // newSelector is the selector of the module's tests, building each package's index with the go
 // command, as many tests at once as there are workers.
-func newSelector(ec execContext, mod gomodule.GoModule, workDir, buildTags string, timeout time.Duration) *selection.Selector {
+func newSelector(ec execContext, mod gomodule.GoModule, wdd workdir.Dealer, buildTags string, timeout time.Duration) *selection.Selector {
 	workers := configuration.Get[int](configuration.UnleashWorkersKey)
 	if workers == 0 {
 		workers = runtime.NumCPU()
 	}
 	builder := selection.GoBuilder{
-		Exec: ec, Module: mod, WorkDir: workDir, Tags: buildTags,
+		Exec: ec, Module: mod, WorkDir: wdd.WorkDir(), Tags: buildTags,
+		Tree:        func() (string, error) { return wdd.Get(selectionTree) },
 		Parallelism: workers, Timeout: timeout,
 	}
+	confirm := configuration.Get[int](configuration.UnleashSelectionConfirmKey)
 
-	return selection.New(builder, func(pkg string, err error) {
-		log.Errorf("test selection: every test of %s runs for each of its mutants: %v\n", pkg, err)
+	return selection.New(builder, confirm, func(pkg string, err error) {
+		log.Errorf("test selection, %s: %v\n", pkg, err)
 	})
 }
 
@@ -228,11 +234,53 @@ func (m *mutantExecutor) Start(w *workerpool.Worker) {
 	m.outCh <- m.mutant
 }
 
+// runTests runs the mutant's tests: the subset the selection chooses, its verdict confirmed where
+// a subset can differ from the whole suite (confirm), or else every test of the package.
 func (m *mutantExecutor) runTests(rootDir, pkg string) mutator.Status {
+	// The selection waits for the package's index before the mutant's time starts.
+	pattern := m.selectedTests(pkg)
+	status := m.runSuite(rootDir, pkg, pattern)
+	if pattern == "" {
+		return status
+	}
+
+	return m.confirm(rootDir, pkg, pattern, status)
+}
+
+// confirm is the verdict of a subset run, status, once checked against the whole suite where the
+// two can differ: a survivor, since a test that kills it may have been left out or need the tests
+// before it; a kill by a subset that fails on the unmutated code too; and a sample of the other
+// kills (selection.Selector.Sampled), any disagreement of which makes the package's later mutants
+// run every test. A subset's time-out or build failure is its verdict.
+func (m *mutantExecutor) confirm(rootDir, pkg, pattern string, status mutator.Status) mutator.Status {
+	if status == mutator.Lived {
+		return m.runSuite(rootDir, pkg, "")
+	}
+	if status != mutator.Killed {
+		return status
+	}
+	if !m.selector.Passes(pkg, pattern) {
+		return m.runSuite(rootDir, pkg, "")
+	}
+	pos := m.mutant.Position()
+	if !m.selector.Sampled(pkg, fmt.Sprintf("%s:%d:%d %s", pos.Filename, pos.Line, pos.Column, m.mutant.Type())) {
+		return status
+	}
+	full := m.runSuite(rootDir, pkg, "")
+	if full != mutator.Killed {
+		m.selector.Disable(pkg, fmt.Errorf("the tests %s killed the mutant %s at %s, every test let it end %s", pattern, m.mutant.Type(), pos, full))
+	}
+
+	return full
+}
+
+// runSuite runs the tests of pkg that pattern selects (every test for "") on the mutant, within
+// the mutant's time.
+func (m *mutantExecutor) runSuite(rootDir, pkg, pattern string) mutator.Status {
 	ctx, cancel := context.WithTimeout(context.Background(), m.testExecutionTime)
 	defer cancel()
 
-	cmd := m.execContext(ctx, "go", m.getTestArgs(pkg, m.selectedTests(pkg))...)
+	cmd := m.execContext(ctx, "go", m.getTestArgs(pkg, pattern)...)
 	cmd.Dir = m.mutant.Workdir()
 	if m.integrationMode {
 		cmd.Dir = rootDir
@@ -260,12 +308,11 @@ func (m *mutantExecutor) selectedTests(pkg string) string {
 	if m.selector == nil || m.integrationMode {
 		return ""
 	}
-	pattern, _ := m.selector.Pattern(pkg, m.mutant.Position())
 
-	return pattern
+	return m.selector.Pattern(pkg, m.mutant.Position())
 }
 
-func (m *mutantExecutor) getTestArgs(pkg, run string) []string {
+func (m *mutantExecutor) getTestArgs(pkg, pattern string) []string {
 	args := []string{"test"}
 	if m.buildTags != "" {
 		args = append(args, "-tags", m.buildTags)
@@ -279,8 +326,8 @@ func (m *mutantExecutor) getTestArgs(pkg, run string) []string {
 	if m.testCPU != 0 {
 		args = append(args, "-cpu", strconv.Itoa(m.testCPU))
 	}
-	if run != "" {
-		args = append(args, "-run", run)
+	if pattern != "" {
+		args = append(args, "-run", pattern)
 	}
 
 	path := pkg

@@ -408,9 +408,41 @@ A mutant whose position no single test covers runs every test of its package; on
 coverage does not reach is still NOT COVERED. If the package cannot be indexed (it does not build,
 or a test fails when it runs alone, for example because it depends on another test running
 first), every mutant of that package runs every test. The flag has no effect in integration mode.
+The index is built outside every mutant's time: a mutant's timeout starts when its tests start.
+
+Selection assumes that a test's outcome does not depend on which tests of its package ran before
+it in the same process. Where a subset of the tests can answer otherwise than the whole suite,
+Gremlins checks the subset's verdict with every test of the package:
+
+- a mutant the selected tests let live runs every test, whose verdict stands, since a test that
+  kills it may need the tests before it;
+- a mutant the selected tests kill counts as KILLED only if those tests pass together on the
+  unmutated code (checked once per package and selection); otherwise every test runs and its
+  verdict stands;
+- the first such kill of each package, and a deterministic share of the others
+  (`--test-selection-confirm`), run every test as well; if every test disagrees, Gremlins logs
+  `SELECTION DISAGREES WITH THE WHOLE SUITE` and runs every test for the package's remaining
+  mutants.
+
+A subset's TIMED OUT and NOT VIABLE stand as they are. What these checks do not catch is a
+mutant that itself leaves state behind that makes a later selected test fail, outside the
+confirmed share: such a mutant can count as KILLED although the whole suite would let it live.
+Running the suite with `go test -shuffle=on` finds the order-dependent tests this needs.
 
 ```shell
 gremlins unleash --test-selection
+```
+
+### Test selection confirmation
+
+:material-flag: `--test-selection-confirm` · :material-sign-direction: Default: `5`
+
+The percentage of a package's kills by selected tests that Gremlins runs again with every test
+of the package, besides the package's first, which always runs again. The share is chosen by a
+hash of the mutant's position and type, so the same mutants are confirmed on every run.
+
+```shell
+gremlins unleash --test-selection --test-selection-confirm=10
 ```
 
 ### Workers

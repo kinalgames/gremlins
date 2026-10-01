@@ -48,6 +48,7 @@ const (
 	UnleashThresholdEfficacyKey  = "unleash.threshold.efficacy"
 	UnleashThresholdMCoverageKey = "unleash.threshold.mutant-coverage"
 	UnleashTestSelectionKey      = "unleash.test-selection"
+	UnleashSelectionConfirmKey   = "unleash.test-selection-confirm"
 )
 
 const (

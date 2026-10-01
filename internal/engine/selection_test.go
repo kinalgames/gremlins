@@ -18,63 +18,110 @@ package engine_test
 
 import (
 	"context"
+	"errors"
 	"go/token"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-gremlins/gremlins/internal/configuration"
 	"github.com/go-gremlins/gremlins/internal/coverage"
 	"github.com/go-gremlins/gremlins/internal/engine"
+	"github.com/go-gremlins/gremlins/internal/engine/workdir"
 	"github.com/go-gremlins/gremlins/internal/engine/workerpool"
 	"github.com/go-gremlins/gremlins/internal/gomodule"
 	"github.com/go-gremlins/gremlins/internal/mutator"
 	"github.com/go-gremlins/gremlins/internal/selection"
 )
 
-// indexStub answers one index for every package and counts its calls.
+const (
+	fileA   = "a.go"
+	testOne = "^(TestOne)$"
+	initmod = "initmod"
+)
+
+// indexStub answers, for every package after delay, an index of a.go where TestOne covers lines
+// 3 to 5, TestTwo lines 4 to 9 and TestThree lines 20 to 30; the patterns in failing fail on the
+// unmutated code.
 type indexStub struct {
-	m     sync.Mutex
-	calls int
+	m       sync.Mutex
+	calls   int
+	delay   time.Duration
+	failing map[string]bool
 }
 
 func (s *indexStub) Index(string) (selection.Index, error) {
+	time.Sleep(s.delay)
 	s.m.Lock()
 	defer s.m.Unlock()
 	s.calls++
 
 	return selection.Index{
-		Tests: []string{"TestOne", "TestTwo"},
+		Tests: []string{"TestOne", "TestTwo", "TestThree"},
 		Profiles: []coverage.Profile{
-			{"a.go": {{StartLine: 3, StartCol: 1, EndLine: 5, EndCol: 2}}},
-			{"a.go": {{StartLine: 4, StartCol: 1, EndLine: 9, EndCol: 2}}},
+			{fileA: {{StartLine: 3, StartCol: 1, EndLine: 5, EndCol: 2}}},
+			{fileA: {{StartLine: 4, StartCol: 1, EndLine: 9, EndCol: 2}}},
+			{fileA: {{StartLine: 20, StartCol: 1, EndLine: 30, EndCol: 2}}},
 		},
 	}, nil
 }
 
-// commands records every command a dealer starts and runs each as a success.
+func (s *indexStub) Passes(_ selection.Index, pattern string) error {
+	if s.failing[pattern] {
+		return errors.New("FAIL")
+	}
+
+	return nil
+}
+
+// commands records every command a dealer starts, with the time left to it, and runs a command
+// with -run as subset does and any other as whole does.
 type commands struct {
-	m    sync.Mutex
-	runs [][]string
+	m             sync.Mutex
+	runs          [][]string
+	timeouts      []time.Duration
+	subset, whole execContext
 }
 
 func (c *commands) exec(ctx context.Context, command string, args ...string) *exec.Cmd {
+	deadline, _ := ctx.Deadline()
 	c.m.Lock()
 	defer c.m.Unlock()
 	c.runs = append(c.runs, append([]string{command}, args...))
+	c.timeouts = append(c.timeouts, time.Until(deadline))
+	if slices.Contains(args, "-run") {
+		return c.subset(ctx, command, args...)
+	}
 
-	return fakeExecCommandSuccess(ctx, command, args...)
+	return c.whole(ctx, command, args...)
 }
 
-// runMutant runs mut with the dealer's executor and answers the commands it started.
-func runMutant(t *testing.T, mut *mutantStub, opts ...engine.ExecutorDealerOption) [][]string {
+func (c *commands) all() [][]string {
+	c.m.Lock()
+	defer c.m.Unlock()
+
+	return slices.Clone(c.runs)
+}
+
+// runMutant runs mut, whose package's tests last elapsed, with a dealer starting got's commands,
+// and answers the commands it started.
+func runMutant(t *testing.T, mut *mutantStub, got *commands, elapsed time.Duration, opts ...engine.ExecutorDealerOption) [][]string {
 	t.Helper()
-	got := &commands{}
+	before := len(got.all())
 	mod := gomodule.GoModule{Name: expectedModule, Root: t.TempDir(), CallingDir: "."}
-	dealer := engine.NewExecutorDealer(mod, tempDealer{newWdDealerStub(t)}, expectedTimeout,
+	dealer := engine.NewExecutorDealer(mod, tempDealer{newWdDealerStub(t)}, elapsed,
 		append([]engine.ExecutorDealerOption{engine.WithExecContext(got.exec)}, opts...)...)
+	start(dealer, mut, "selection")
+
+	return got.all()[before:]
+}
+
+// start runs mut to its end on an executor of dealer.
+func start(dealer engine.ExecutorDealer, mut mutator.Mutator, worker string) {
 	outCh := make(chan mutator.Mutator)
 	wg := sync.WaitGroup{}
 	wg.Add(1)
@@ -83,10 +130,8 @@ func runMutant(t *testing.T, mut *mutantStub, opts ...engine.ExecutorDealerOptio
 		<-outCh
 		close(outCh)
 	}()
-	executor.Start(&workerpool.Worker{Name: "selection", ID: 1})
+	executor.Start(&workerpool.Worker{Name: worker, ID: 1})
 	wg.Wait()
-
-	return got.runs
 }
 
 // tempDealer is a work directory dealer whose work directory exists.
@@ -94,34 +139,157 @@ type tempDealer struct{ *dealerStub }
 
 func (d tempDealer) WorkDir() string { return d.t.TempDir() }
 
-func tokenPosition(file string, line int) token.Position {
-	return token.Position{Filename: file, Line: line, Column: 2}
-}
-
 func mutantAt(status mutator.Status, line int) *mutantStub {
 	return &mutantStub{status: status, mutType: mutator.ConditionalsBoundary, pkg: "example.com/p",
-		position: tokenPosition("a.go", line)}
+		position: token.Position{Filename: fileA, Line: line, Column: 2}}
+}
+
+// passing runs every command as a success.
+func passing() *commands {
+	return &commands{subset: fakeExecCommandSuccess, whole: fakeExecCommandSuccess}
+}
+
+// runArg is the -run pattern of a command, or "" for none.
+func runArg(args []string) string {
+	if i := slices.Index(args, "-run"); i >= 0 {
+		return args[i+1]
+	}
+
+	return ""
+}
+
+// heard collects what a selector reports.
+type heard struct {
+	m    sync.Mutex
+	errs []string
+}
+
+func (h *heard) report(pkg string, err error) {
+	h.m.Lock()
+	defer h.m.Unlock()
+	h.errs = append(h.errs, pkg+": "+err.Error())
+}
+
+func (h *heard) all() string {
+	h.m.Lock()
+	defer h.m.Unlock()
+
+	return strings.Join(h.errs, "\n")
 }
 
 func TestAMutantRunsTheTestsThatCoverIt(t *testing.T) {
 	cases := []struct {
 		line int
-		run  []string
+		runs []string // the -run of each command: the subset, then every test to confirm it lives
 	}{
-		{3, []string{"-run", "^(TestOne)$"}},
-		{4, []string{"-run", "^(TestOne|TestTwo)$"}},
-		{12, nil},
+		{3, []string{testOne, ""}},
+		{4, []string{"^(TestOne|TestTwo)$", ""}},
+		{12, []string{""}},
 	}
 	for _, tc := range cases {
-		stub := &indexStub{}
-		runs := runMutant(t, mutantAt(mutator.Runnable, tc.line), engine.WithSelector(selection.New(stub, func(string, error) {})))
-		if len(runs) != 1 {
-			t.Fatalf("line %d: commands %v", tc.line, runs)
+		got := passing()
+		mut := mutantAt(mutator.Runnable, tc.line)
+		runs := runMutant(t, mut, got, expectedTimeout, engine.WithSelector(selection.New(&indexStub{}, 0, (&heard{}).report)))
+		patterns := make([]string, len(runs))
+		for i, args := range runs {
+			patterns[i] = runArg(args)
+			if args[len(args)-1] != "example.com/p" {
+				t.Errorf("line %d: %v does not end with the package", tc.line, args)
+			}
 		}
-		args := runs[0]
-		i := slices.Index(args, "-run")
-		if (tc.run == nil) != (i < 0) || (i >= 0 && (args[i+1] != tc.run[1] || args[len(args)-1] != "example.com/p")) {
-			t.Errorf("line %d: %v, want %v before the package", tc.line, args, tc.run)
+		if !slices.Equal(patterns, tc.runs) || mut.Status() != mutator.Lived {
+			t.Errorf("line %d: runs %v, %v; want %q, LIVED", tc.line, runs, mut.Status(), tc.runs)
+		}
+	}
+}
+
+// confirmCases are a subset's verdict, how every test answers, and the verdict that stands.
+var confirmCases = []struct {
+	name          string
+	subset, whole execContext
+	failing       bool // the subset fails on the unmutated code
+	status        mutator.Status
+	runs          int
+	heard         string
+}{
+	{"a survivor every test kills", fakeExecCommandSuccess, fakeExecCommandTestsFailure, false, mutator.Killed, 2, ""},
+	{"a survivor every test lets live", fakeExecCommandSuccess, fakeExecCommandSuccess, false, mutator.Lived, 2, ""},
+	{"a kill by a subset that fails unmutated", fakeExecCommandTestsFailure, fakeExecCommandSuccess, true, mutator.Lived, 2, "fail together"},
+	{"a first kill every test agrees with", fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, false, mutator.Killed, 2, ""},
+	{"a first kill every test disagrees with", fakeExecCommandTestsFailure, fakeExecCommandSuccess, false, mutator.Lived, 2, "SELECTION DISAGREES"},
+	{"a subset that does not build", fakeExecCommandBuildFailure, fakeExecCommandSuccess, false, mutator.NotViable, 1, ""},
+}
+
+func TestASubsetsVerdictIsCheckedWithEveryTestWhereTheTwoCanDiffer(t *testing.T) {
+	for _, tc := range confirmCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := &commands{subset: tc.subset, whole: tc.whole}
+			h := &heard{}
+			stub := &indexStub{failing: map[string]bool{testOne: tc.failing}}
+			mut := mutantAt(mutator.Runnable, 3)
+			runs := runMutant(t, mut, got, expectedTimeout, engine.WithSelector(selection.New(stub, 0, h.report)))
+			if mut.Status() != tc.status || len(runs) != tc.runs || runArg(runs[0]) != testOne || (tc.runs == 2 && runArg(runs[1]) != "") {
+				t.Errorf("%v after %v, want %v after %d commands", mut.Status(), runs, tc.status, tc.runs)
+			}
+			if heard := h.all(); (tc.heard == "") != (heard == "") || !strings.Contains(heard, tc.heard) {
+				t.Errorf("heard %q, want %q", heard, tc.heard)
+			}
+		})
+	}
+}
+
+func TestAKillOutsideTheSampleStands(t *testing.T) {
+	got := &commands{subset: fakeExecCommandTestsFailure, whole: fakeExecCommandTestsFailure}
+	sel := engine.WithSelector(selection.New(&indexStub{}, 0, (&heard{}).report))
+	if runs := runMutant(t, mutantAt(mutator.Runnable, 3), got, expectedTimeout, sel); len(runs) != 2 {
+		t.Fatalf("the first kill: %v", runs)
+	}
+	mut := mutantAt(mutator.Runnable, 4)
+	if runs := runMutant(t, mut, got, expectedTimeout, sel); len(runs) != 1 || mut.Status() != mutator.Killed {
+		t.Fatalf("the second kill: %v after %v", mut.Status(), runs)
+	}
+}
+
+func TestADisagreementMakesThePackageRunEveryTest(t *testing.T) {
+	got := &commands{subset: fakeExecCommandTestsFailure, whole: fakeExecCommandSuccess}
+	sel := engine.WithSelector(selection.New(&indexStub{}, 0, (&heard{}).report))
+	runMutant(t, mutantAt(mutator.Runnable, 3), got, expectedTimeout, sel)
+	if runs := runMutant(t, mutantAt(mutator.Runnable, 4), got, expectedTimeout, sel); len(runs) != 1 || runArg(runs[0]) != "" {
+		t.Fatalf("after the disagreement: %v", runs)
+	}
+}
+
+func TestASubsetsTimeOutStands(t *testing.T) {
+	mut := mutantAt(mutator.Runnable, 3)
+	runs := runMutant(t, mut, passing(), time.Nanosecond, engine.WithSelector(selection.New(&indexStub{}, 0, (&heard{}).report)))
+	if len(runs) != 1 || mut.Status() != mutator.TimedOut {
+		t.Fatalf("%v after %v", mut.Status(), runs)
+	}
+}
+
+func TestTheIndexIsNotChargedToTheMutantsTime(t *testing.T) {
+	const elapsed = 500 * time.Millisecond
+	budget := elapsed * engine.DefaultTimeoutCoefficient
+	got := passing()
+	sel := engine.WithSelector(selection.New(&indexStub{delay: budget + 500*time.Millisecond}, 0, (&heard{}).report))
+	mutants := []*mutantStub{mutantAt(mutator.Runnable, 3), mutantAt(mutator.Runnable, 4)}
+	var wg sync.WaitGroup
+	for _, mut := range mutants {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runMutant(t, mut, got, elapsed, sel)
+		}()
+	}
+	wg.Wait()
+	for _, mut := range mutants {
+		if mut.Status() != mutator.Lived {
+			t.Errorf("%v: %v", mut.Position(), mut.Status())
+		}
+	}
+	for i, left := range got.timeouts {
+		if left < budget/2 || left > budget {
+			t.Errorf("%v had %v of its %v", got.runs[i], left, budget)
 		}
 	}
 }
@@ -129,7 +297,7 @@ func TestAMutantRunsTheTestsThatCoverIt(t *testing.T) {
 func TestAMutantNoTestCoversIsNeitherIndexedNorRun(t *testing.T) {
 	stub := &indexStub{}
 	mut := mutantAt(mutator.NotCovered, 4)
-	if runs := runMutant(t, mut, engine.WithSelector(selection.New(stub, func(string, error) {}))); len(runs) != 0 || stub.calls != 0 {
+	if runs := runMutant(t, mut, passing(), expectedTimeout, engine.WithSelector(selection.New(stub, 0, (&heard{}).report))); len(runs) != 0 || stub.calls != 0 {
 		t.Fatalf("commands %v, %d indexings", runs, stub.calls)
 	}
 	if mut.Status() != mutator.NotCovered {
@@ -141,31 +309,55 @@ func TestIntegrationModeRunsEveryTest(t *testing.T) {
 	viperSet(map[string]any{configuration.UnleashIntegrationMode: true})
 	defer viperReset()
 	stub := &indexStub{}
-	runs := runMutant(t, mutantAt(mutator.Runnable, 4), engine.WithSelector(selection.New(stub, func(string, error) {})))
-	if len(runs) != 1 || slices.Contains(runs[0], "-run") || stub.calls != 0 {
+	runs := runMutant(t, mutantAt(mutator.Runnable, 4), passing(), expectedTimeout, engine.WithSelector(selection.New(stub, 0, (&heard{}).report)))
+	if len(runs) != 1 || runArg(runs[0]) != "" || stub.calls != 0 {
 		t.Fatalf("commands %v, %d indexings", runs, stub.calls)
 	}
 }
 
+// settingCases are the settings of a run and the -run of the mutant's first command, in a
+// fixture of internal/selection/testdata at a position one test covers.
+var settingCases = []struct {
+	name     string
+	settings map[string]any
+	fixture  string
+	line     int
+	run      string
+}{
+	{"on, two workers", map[string]any{configuration.UnleashTestSelectionKey: true, configuration.UnleashWorkersKey: 2}, initmod, 25, "^(TestAdd)$"},
+	{"on, the default workers", map[string]any{configuration.UnleashTestSelectionKey: true, configuration.UnleashWorkersKey: 0}, initmod, 25, "^(TestAdd)$"},
+	{"on, with build tags", map[string]any{configuration.UnleashTestSelectionKey: true, configuration.UnleashTagsKey: "extra"}, "kinds", 31, "^(TestTagged)$"},
+	{"on, a package that cannot be indexed", map[string]any{configuration.UnleashTestSelectionKey: true}, "orderdep", 7, ""},
+	{"on, in integration mode", map[string]any{configuration.UnleashTestSelectionKey: true, configuration.UnleashIntegrationMode: true}, initmod, 25, ""},
+	{"off", map[string]any{configuration.UnleashTestSelectionKey: false}, initmod, 25, ""},
+}
+
 func TestTheTestSelectionSettingIndexesWithTheGoCommand(t *testing.T) {
-	cases := []struct {
-		name     string
-		settings map[string]any
-		indexed  bool
-	}{
-		{"on, two workers", map[string]any{configuration.UnleashTestSelectionKey: true, configuration.UnleashWorkersKey: 2}, true},
-		{"on, the default workers", map[string]any{configuration.UnleashTestSelectionKey: true, configuration.UnleashWorkersKey: 0}, true},
-		{"on, in integration mode", map[string]any{configuration.UnleashTestSelectionKey: true, configuration.UnleashIntegrationMode: true}, false},
-		{"off", map[string]any{configuration.UnleashTestSelectionKey: false}, false},
-	}
-	for _, tc := range cases {
+	t.Setenv("GOWORK", "off")
+	t.Setenv("GOFLAGS", "-mod=mod")
+	for _, tc := range settingCases {
 		t.Run(tc.name, func(t *testing.T) {
 			viperSet(tc.settings)
 			defer viperReset()
-			runs := runMutant(t, mutantAt(mutator.Runnable, 4))
-			built := len(runs) == 2 && strings.HasPrefix(strings.Join(runs[0], " "), "go test -c -cover -covermode=set -o ")
-			if built != tc.indexed || len(runs) == 0 || slices.Contains(runs[len(runs)-1], "-run") {
-				t.Fatalf("commands %v: want the test binary built %t, then every test of the mutant's package run", runs, tc.indexed)
+			root, err := filepath.Abs(filepath.Join("..", "selection", "testdata", tc.fixture))
+			if err != nil {
+				t.Fatal(err)
+			}
+			mod := gomodule.GoModule{Name: "example.com/" + tc.fixture, Root: root, CallingDir: "."}
+			wdd := workdir.NewCachedDealer(t.TempDir(), root)
+			defer wdd.Clean()
+			got := &commands{subset: exec.CommandContext, whole: exec.CommandContext}
+			mut := &mutantStub{status: mutator.Runnable, mutType: mutator.ArithmeticBase, pkg: mod.Name,
+				position: token.Position{Filename: tc.fixture + ".go", Line: tc.line, Column: 11}}
+			start(engine.NewExecutorDealer(mod, wdd, 30*time.Second, engine.WithExecContext(got.exec)), mut, "selection")
+			var tests [][]string // the mutant's commands, not the index's
+			for _, args := range got.all() {
+				if args[0] == "go" && !slices.Contains(args, "-c") {
+					tests = append(tests, args)
+				}
+			}
+			if len(tests) == 0 || runArg(tests[0]) != tc.run || mut.Status() != mutator.Lived {
+				t.Fatalf("%v after %v, want -run %q first", mut.Status(), got.all(), tc.run)
 			}
 		})
 	}
