@@ -51,6 +51,39 @@ func TestCopyFolder(t *testing.T) {
 	}
 }
 
+// A copy leaves no file of it or of its source open: on Windows an open file keeps the run's
+// directories from being removed, and on Linux each would hold a descriptor until the run ends.
+func TestCopyLeavesNoFileOpen(t *testing.T) {
+	srcDir := t.TempDir()
+	populateSrcDir(t, srcDir, 3)
+	wdDir := t.TempDir()
+	before := openFiles(t)
+
+	dealer := workdir.NewCachedDealer(wdDir, srcDir)
+	dstDir, err := dealer.Get("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := openFiles(t); after != before {
+		t.Errorf("open descriptors: %d before the copy, %d after", before, after)
+	}
+	if err := os.RemoveAll(dstDir); err != nil {
+		t.Errorf("the copy cannot be removed: %v", err)
+	}
+}
+
+// openFiles is the number of descriptors this process holds, where the system lists them
+// (/proc/self/fd), else -1.
+func openFiles(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return -1
+	}
+
+	return len(entries)
+}
+
 func checkForDifferentFile(t *testing.T, srcDir string, dstDir string) func(path string, srcFileInfo fs.FileInfo, err error) error {
 	t.Helper()
 

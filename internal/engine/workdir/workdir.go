@@ -18,6 +18,7 @@
 package workdir
 
 import (
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -154,21 +155,21 @@ func copyPath(srcPath, dstPath string, info fs.FileInfo) error {
 	return nil
 }
 
+// doCopy copies srcPath to dstPath and closes both: on Windows an open file keeps the copy's
+// directory from being removed when the run ends.
 func doCopy(srcPath, dstPath string, fileMode fs.FileMode) error {
 	//nolint:gosec // srcPath is internally controlled, not user input
 	s, err := os.Open(srcPath)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = s.Close() }()
 	//nolint:gosec // dstPath is internally controlled, not user input
 	d, err := os.OpenFile(dstPath, os.O_CREATE|os.O_RDWR, fileMode)
 	if err != nil {
 		return err
 	}
+	_, err = io.Copy(d, s)
 
-	if _, err = io.Copy(d, s); err != nil {
-		return err
-	}
-
-	return nil
+	return errors.Join(err, d.Close())
 }
