@@ -88,6 +88,9 @@ func TestATextMutantMustNameTextThatOccursOnceInTheModule(t *testing.T) {
 		{fileSubQ, "", "the text to replace is empty"},
 		{"sub/none.go", "x", "none.go"},
 		{"../q.go", "x", "outside the module"},
+		{"sub/Q.go", "x", "sub/Q.go names Q.go, which the disk names q.go"},
+		{"Sub/q.go", "x", "Sub/q.go names Sub, which the disk names sub"},
+		{"missing/q.go", "x", "missing"},
 	}
 	for _, tc := range cases {
 		if _, err := engine.NewTextMutant(switchModule(t, "."), tc.file, tc.original, "x"); err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -197,6 +200,7 @@ func TestExtraMutantsMustEachBeOneMutantOfTheModule(t *testing.T) {
 	}{
 		{"q.go|const Limit = 10\n", ":1: want file|original|mutated"},
 		{"q.go|const Limit = 10|x\nq.go|return|x\n", `:2: q.go: "return" occurs 2 times`},
+		{"q.go|const Limit = 10|x\nQ.go|return|x\n", ":2: Q.go names Q.go, which the disk names q.go"},
 	}
 	for _, tc := range lists {
 		path := filepath.Join(t.TempDir(), "mutants.txt")

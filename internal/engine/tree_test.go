@@ -21,9 +21,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/go-gremlins/gremlins/internal/configuration"
 	"github.com/go-gremlins/gremlins/internal/engine"
 	"github.com/go-gremlins/gremlins/internal/mutator"
 )
@@ -56,6 +58,58 @@ func pendingIn(t *testing.T, root string) (engine.Deferred, error) {
 	mut.position.Filename = fileP
 
 	return dealer.Defer([]mutator.Mutator{mut})
+}
+
+// writtenFiles are the files a module root holds beside treeFiles: p/other.json, p/pending.json,
+// a temporary file a write left beside it, and p/report.json, in the order Defer records them.
+var writtenFiles = []string{"p/other.json", "p/pending.json", "p/pending.json.42", "p/report.json"}
+
+// writtenCases are where --settle-later and -o point, relative to that module root, and which of
+// writtenFiles Defer records.
+var writtenCases = []struct {
+	name, later, output string
+	relative            bool
+	recorded            []string
+}{
+	{"both in the package", writtenFiles[1], writtenFiles[3], false, writtenFiles[:1]},
+	{"neither set", "", "", false, writtenFiles},
+	{"relative paths", writtenFiles[1], writtenFiles[3], true, writtenFiles},
+	{"outside the module", "../pending.json", "../p/report.json", false, writtenFiles},
+}
+
+func TestDeferLeavesOutTheFilesTheRunsWrite(t *testing.T) {
+	for _, tc := range writtenCases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := treeRoot(t)
+			for _, name := range writtenFiles {
+				if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte(name), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			at := func(p string) string {
+				if p == "" || tc.relative {
+					return p
+				}
+
+				return filepath.Join(root, filepath.FromSlash(p))
+			}
+			viperSet(map[string]any{configuration.UnleashSettleLaterKey: at(tc.later), configuration.UnleashOutputKey: at(tc.output)})
+			got, err := pendingIn(t, root)
+			viperReset()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var recorded []string
+			for _, f := range got.Files {
+				if strings.HasSuffix(f.Path, ".json") || strings.HasSuffix(f.Path, ".42") {
+					recorded = append(recorded, f.Path)
+				}
+			}
+			if !slices.Equal(recorded, tc.recorded) || got.Output != at(tc.output) {
+				t.Errorf("recorded %v and the report %q, want %v and %q", recorded, got.Output, tc.recorded, at(tc.output))
+			}
+		})
+	}
 }
 
 func TestDeferLeavesOutWhatIsNotARegularFile(t *testing.T) {

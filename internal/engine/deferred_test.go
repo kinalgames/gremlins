@@ -642,7 +642,7 @@ func TestARunNamesHowManyMutantsWaitToRunAlone(t *testing.T) {
 	defer c()
 	e := engine.New(mod, testCodeData, &onePending{}, engine.WithDirFs(mapFS))
 	res := e.Run(context.Background())
-	if res.Pending != 1 || !strings.Contains(out.String(), "1 mutant waits to run alone: gremlins unleash --settle "+path) {
+	if res.Pending != 1 || !strings.Contains(out.String(), "1 mutant waits to run alone: gremlins unleash --settle "+path+" "+filepath.Join(mod.Root, mod.CallingDir)+"\n") {
 		t.Errorf("%d pending, logged %q", res.Pending, out.String())
 	}
 }

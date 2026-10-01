@@ -298,10 +298,11 @@ func (mu *Engine) deferSettle(pending []mutator.Mutator) bool {
 
 		return false
 	}
+	pkg := filepath.Join(mu.module.Root, mu.module.CallingDir)
 	if len(pending) == 1 {
-		log.Infof("1 mutant waits to run alone: gremlins unleash --settle %s\n", path)
+		log.Infof("1 mutant waits to run alone: gremlins unleash --settle %s %s\n", path, pkg)
 	} else {
-		log.Infof("%d mutants wait to run alone: gremlins unleash --settle %s\n", len(pending), path)
+		log.Infof("%d mutants wait to run alone: gremlins unleash --settle %s %s\n", len(pending), path, pkg)
 	}
 
 	return true

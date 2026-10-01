@@ -18,8 +18,6 @@ package engine
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,13 +38,15 @@ import (
 // Deferred is what a run hands to a later run that settles its pending mutants (Settler) once
 // nothing else runs on the machine, as when several gremlins runs share it: the time each
 // mutant's tests get, the settings that change a verdict, the files its verdicts can rest on with
-// their digests (tree), the packages whose test selection was disabled, and each pending mutant.
+// their digests (tree), the packages whose test selection was disabled, each pending mutant, and
+// the absolute path of the run's report (-o), which the settling run leaves out of the tree.
 type Deferred struct {
 	Timeout  time.Duration    `json:"timeout"`
 	Settings Settings         `json:"settings"`
 	Files    []DeferredFile   `json:"files"`
 	Disabled []string         `json:"disabled,omitempty"`
 	Mutants  []DeferredMutant `json:"mutants"`
+	Output   string           `json:"output,omitempty"`
 }
 
 // Settings are the settings of a run that change a mutant's verdict: the package directory the
@@ -90,12 +90,16 @@ type DeferredMutant struct {
 }
 
 // Defer is the state Settle would need to settle pending, all of them pending (Pending), or an
-// error when a file of their packages cannot be read for its digest.
+// error when a file of their packages cannot be read for its digest. The tree leaves out the file
+// --settle-later names and the run's report (-o), which the run writes after it.
 func (m MutantExecutorDealer) Defer(pending []mutator.Mutator) (Deferred, error) {
 	confirm := m.unsettled.confirmations()
 	pending = slices.Clone(pending)
 	slices.SortFunc(pending, byID)
-	d := Deferred{Timeout: m.testExecutionTime, Settings: m.settings(), Mutants: make([]DeferredMutant, 0, len(pending))}
+	d := Deferred{
+		Timeout: m.testExecutionTime, Settings: m.settings(), Mutants: make([]DeferredMutant, 0, len(pending)),
+		Output: configuration.Get[string](configuration.UnleashOutputKey),
+	}
 	m.unsettled.mu.Lock()
 	defer m.unsettled.mu.Unlock()
 	for _, mut := range pending {
@@ -110,11 +114,12 @@ func (m MutantExecutorDealer) Defer(pending []mutator.Mutator) (Deferred, error)
 			d.Disabled = append(d.Disabled, k.pkg)
 		}
 	}
-	files, err := m.tree(m.mutantDirs(d.Mutants))
+	own := m.written(configuration.Get[string](configuration.UnleashSettleLaterKey), d.Output)
+	s, err := m.tree(m.mutantDirs(d.Mutants), nil, own)
 	if err != nil {
 		return Deferred{}, err
 	}
-	d.Files = deferredFiles(files)
+	d.Files = deferredFiles(s)
 
 	return d, nil
 }
@@ -141,13 +146,6 @@ func (m MutantExecutorDealer) settings() Settings {
 // fromRoot names file, named from the calling directory, from the module root.
 func (m MutantExecutorDealer) fromRoot(file string) string {
 	return filepath.ToSlash(filepath.Join(m.mod.CallingDir, filepath.FromSlash(file)))
-}
-
-// digest is the hex SHA-256 of src.
-func digest(src []byte) string {
-	sum := sha256.Sum256(src)
-
-	return hex.EncodeToString(sum[:])
 }
 
 // WriteDeferred writes d to the file path: to a temporary file beside it, renamed to path once
@@ -241,20 +239,25 @@ func (m *MutantExecutorDealer) sameRun(d Deferred) (map[string][]byte, error) {
 	if here := m.settings(); d.Settings != here {
 		return nil, fmt.Errorf("the run that deferred the mutants had the settings %+v, this run has %+v", d.Settings, here)
 	}
-	sources, err := m.tree(m.mutantDirs(d.Mutants))
+	keep := map[string]bool{}
+	for _, dm := range d.Mutants {
+		keep[m.fromRoot(dm.File)] = true
+	}
+	own := m.written(configuration.Get[string](configuration.UnleashSettleKey), configuration.Get[string](configuration.UnleashOutputKey), d.Output)
+	s, err := m.tree(m.mutantDirs(d.Mutants), keep, own)
 	if err != nil {
 		return nil, err
 	}
-	if err := sameFiles(d.Files, sources); err != nil {
+	if err := sameFiles(d.Files, s); err != nil {
 		return nil, err
 	}
 	for _, dm := range d.Mutants {
-		if _, recorded := sources[m.fromRoot(dm.File)]; !recorded {
+		if _, recorded := s.contents[m.fromRoot(dm.File)]; !recorded {
 			return nil, fmt.Errorf("%s is not among the files the run that deferred the mutants recorded", dm.File)
 		}
 	}
 
-	return sources, nil
+	return s.contents, nil
 }
 
 // outcomeNamed is the outcome after which a mutant runs again alone that name describes, and

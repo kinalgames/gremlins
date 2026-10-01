@@ -111,10 +111,12 @@ func longExplainer() string {
 func runUnleash(ctx context.Context) func(cmd *cobra.Command, args []string) error {
 	return func(_ *cobra.Command, args []string) error {
 		log.Infoln("Starting...")
-		path, _ := os.Getwd()
+		wd, _ := os.Getwd()
+		path := wd
 		if len(args) > 0 {
 			path = args[0]
 		}
+		absolute(wd, configuration.UnleashSettleKey, configuration.UnleashSettleLaterKey, configuration.UnleashOutputKey)
 		mod, err := gomodule.Init(path)
 		if err != nil {
 			return fmt.Errorf("not in a Go module: %w", err)
@@ -144,6 +146,17 @@ func runUnleash(ctx context.Context) func(cmd *cobra.Command, args []string) err
 		}
 
 		return report.Do(results)
+	}
+}
+
+// absolute makes the relative paths the settings keys hold absolute against the directory wd, where
+// gremlins started: the coverage run changes to the module's root before the run writes them, and
+// a later run with --settle reads them from its own directory.
+func absolute(wd string, keys ...string) {
+	for _, key := range keys {
+		if p := configuration.Get[string](key); p != "" && !filepath.IsAbs(p) {
+			configuration.Set(key, filepath.Join(wd, p))
+		}
 	}
 }
 

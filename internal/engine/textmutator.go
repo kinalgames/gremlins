@@ -46,11 +46,14 @@ type TextMutator struct {
 }
 
 // NewTextMutant is the mutant that replaces original with mutated in file, named from the calling
-// directory of mod, or an error when the file cannot be read, lies outside the module, or does not
-// hold original exactly once.
+// directory of mod, or an error when the file cannot be read, lies outside the module, is named in
+// another case than on disk, or does not hold original exactly once.
 func NewTextMutant(mod gomodule.GoModule, file, original, mutated string) (*TextMutator, error) {
 	name, err := moduleFile(mod, file)
 	if err != nil {
+		return nil, err
+	}
+	if err := exactName(filepath.Join(mod.Root, mod.CallingDir), name); err != nil {
 		return nil, err
 	}
 	src, err := os.ReadFile(filepath.Join(mod.Root, mod.CallingDir, name)) //nolint:gosec // a file of the module under test
@@ -58,7 +61,7 @@ func NewTextMutant(mod gomodule.GoModule, file, original, mutated string) (*Text
 		return nil, err
 	}
 
-	return newTextMutant(mod, file, original, mutated, src)
+	return newTextMutant(mod, name, original, mutated, src)
 }
 
 // moduleFile is file, named from the calling directory of mod, cleaned and with slashes, or an error
@@ -72,12 +75,29 @@ func moduleFile(mod gomodule.GoModule, file string) (string, error) {
 	return file, nil
 }
 
-// newTextMutant is NewTextMutant on src, the content of file.
-func newTextMutant(mod gomodule.GoModule, file, original, mutated string, src []byte) (*TextMutator, error) {
-	file, err := moduleFile(mod, file)
-	if err != nil {
-		return nil, err
+// exactName checks that each element of the slash-separated path name, below the directory dir,
+// is the name of an entry of its directory in the same case. A case-insensitive file system opens
+// a file under another case too, but the run that settles the mutant finds the file by its name on
+// disk, so a list must name it as the disk does.
+func exactName(dir, name string) error {
+	for _, elem := range strings.Split(name, "/") {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return err
+		}
+		exact := slices.ContainsFunc(entries, func(e os.DirEntry) bool { return e.Name() == elem })
+		if i := slices.IndexFunc(entries, func(e os.DirEntry) bool { return strings.EqualFold(e.Name(), elem) }); !exact && i >= 0 {
+			return fmt.Errorf("%s names %s, which the disk names %s", name, elem, entries[i].Name())
+		}
+		dir = filepath.Join(dir, elem)
 	}
+
+	return nil
+}
+
+// newTextMutant is NewTextMutant on src, the content of file, a clean path named from the calling
+// directory of mod.
+func newTextMutant(mod gomodule.GoModule, file, original, mutated string, src []byte) (*TextMutator, error) {
 	if original == "" {
 		return nil, fmt.Errorf("%s: the text to replace is empty", file)
 	}

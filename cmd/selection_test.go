@@ -103,6 +103,14 @@ func unleashed(t *testing.T, dir, pkg string, settings map[string]any, beside ma
 			t.Fatal(err)
 		}
 	}
+
+	return unleashIn(t, copied, pkg, settings)
+}
+
+// unleashIn is unleashed on the module in the directory copied, which it leaves as the run leaves
+// it.
+func unleashIn(t *testing.T, copied, pkg string, settings map[string]any) (map[string]mutator.Status, string, error) {
+	t.Helper()
 	errs := &bytes.Buffer{}
 	log.Reset()
 	log.Init(&bytes.Buffer{}, errs)
@@ -361,6 +369,60 @@ func TestASettlingRunRefusesAnEditOfTheTestsOrTheToolchain(t *testing.T) {
 	t.Setenv("GOFLAGS", modMod)
 	if got, logged := unleash(t, dir, "", settings, nil); !maps.Equal(got, map[string]mutator.Status{"testedit.go:6 ARITHMETIC_BASE": mutator.Lived}) {
 		t.Fatalf("settled %v in the tree that deferred it; logged %s", got, logged)
+	}
+}
+
+// TestASettlingRunLeavesOutTheFilesTheRunsWrite runs both runs in one tree that holds the settle
+// file, a temporary file WriteDeferred left beside it, and the reports (-o) of both runs, as a run
+// on the module's own directory with relative paths leaves them.
+func TestASettlingRunLeavesOutTheFilesTheRunsWrite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs gremlins with the go command")
+	}
+	t.Setenv("GOWORK", "off")
+	t.Setenv("GOFLAGS", modMod)
+	t.Setenv("TESTEDIT_MARKER", filepath.Join(t.TempDir(), "crashed"))
+	copied := filepath.Join(t.TempDir(), "testedit")
+	if err := os.CopyFS(copied, os.DirFS(filepath.Join("testdata", "testedit"))); err != nil {
+		t.Fatal(err)
+	}
+	path, report := filepath.Join(copied, "pending.json"), filepath.Join(copied, "report.json")
+	deferring := map[string]any{configuration.UnleashSettleLaterKey: path, configuration.UnleashOutputKey: report, configuration.UnleashTimeoutCoefficientKey: 30}
+	if first, logged, err := unleashIn(t, copied, "", deferring); err != nil || len(first) != 0 {
+		t.Fatalf("the deferring run reported %v: %v; logged %s", first, err, logged)
+	}
+	for _, name := range []string{report, path + ".123456"} { // the deferring run's report, a write that died
+		if err := os.WriteFile(name, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	settling := map[string]any{configuration.UnleashSettleKey: path, configuration.UnleashOutputKey: filepath.Join(copied, "settled.json")}
+	for range 2 { // the second finds the first's report
+		got, logged, err := unleashIn(t, copied, "", settling)
+		if err != nil || !maps.Equal(got, map[string]mutator.Status{"testedit.go:6 ARITHMETIC_BASE": mutator.Lived}) {
+			t.Fatalf("settled %v: %v; logged %s", got, err, logged)
+		}
+		if err := os.WriteFile(filepath.Join(copied, "settled.json"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestRelativePathsAreReadFromWhereGremlinsStarted(t *testing.T) {
+	defer configuration.Reset()
+	wd := t.TempDir()
+	abs := filepath.Join(t.TempDir(), "report.json")
+	configuration.Set(configuration.UnleashSettleLaterKey, "pending.json")
+	configuration.Set(configuration.UnleashOutputKey, abs)
+	absolute(wd, configuration.UnleashSettleKey, configuration.UnleashSettleLaterKey, configuration.UnleashOutputKey)
+	if got := configuration.Get[string](configuration.UnleashSettleLaterKey); got != filepath.Join(wd, "pending.json") {
+		t.Errorf("settle-later %s", got)
+	}
+	if got := configuration.Get[string](configuration.UnleashOutputKey); got != abs {
+		t.Errorf("output %s, want it as given", got)
+	}
+	if got := configuration.Get[string](configuration.UnleashSettleKey); got != "" {
+		t.Errorf("settle %q, want it unset", got)
 	}
 }
 

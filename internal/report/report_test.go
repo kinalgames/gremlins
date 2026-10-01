@@ -329,6 +329,7 @@ func TestMutantLog(t *testing.T) {
 	m = stubMutant{status: mutator.Skipped, mutantType: mutator.ConditionalsBoundary, position: fakePosition}
 	report.Mutant(m)
 	report.Mutant(listedStub{stubMutant{status: mutator.Lived, mutantType: mutator.Extra, position: fakePosition}, 7})
+	report.Mutant(listedStub{stubMutant{status: mutator.Killed, mutantType: mutator.Extra, position: fakePosition}, 1})
 
 	got := out.String()
 
@@ -340,7 +341,8 @@ func TestMutantLog(t *testing.T) {
 		"  NOT VIABLE CONDITIONALS_BOUNDARY at aFolder/aFile.go:12:3\n" +
 		"   TIMED OUT CONDITIONALS_BOUNDARY at aFolder/aFile.go:12:3\n" +
 		"     SKIPPED CONDITIONALS_BOUNDARY at aFolder/aFile.go:12:3\n" +
-		"       LIVED EXTRA at aFolder/aFile.go:12:3 (line 7 of the extra mutants)\n"
+		"       LIVED EXTRA at aFolder/aFile.go:12:3 (line 7 of the extra mutants)\n" +
+		"      KILLED EXTRA at aFolder/aFile.go:12:3 (line 1 of the extra mutants)\n"
 
 	if !cmp.Equal(got, want) {
 		t.Error(cmp.Diff(got, want))
