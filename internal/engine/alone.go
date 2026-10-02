@@ -170,9 +170,10 @@ func (m MutantExecutorDealer) Settle(ctx context.Context, muts []mutator.Mutator
 
 // runAlone runs mut again with every test of its package, in a work directory of its own, and
 // gives it the verdict of its first outcome and this run's (aloneStatus); it reports the outcome.
-// A time-out or a crash that repeats counts only if every test passes on the unmutated code in the
-// same place: what failed may be the place, such as a database that went away, not the mutant. A
-// cancelled run, or a copy that does not hold the source, leaves mut UNCLASSIFIED.
+// Every kill alone, a time-out or a crash that repeats or a test that fails, counts only if every
+// test passes on the unmutated code in the same place: what failed may be the place, such as a
+// database that went away, not the mutant. A cancelled run, or a copy that does not hold the
+// source, leaves mut UNCLASSIFIED.
 func (m MutantExecutorDealer) runAlone(ctx context.Context, mut mutator.Mutator, first outcome) outcome {
 	if !checkDone(ctx) {
 		mut.SetStatus(mutator.Unclassified)
@@ -188,15 +189,25 @@ func (m MutantExecutorDealer) runAlone(ctx context.Context, mut mutator.Mutator,
 	}
 	o := e.test(aloneWorker, func() outcome { return e.runSuite(rootDir, mut.Pkg(), "") })
 	status := aloneStatus(first, o)
-	if repeats(first, o) {
+	if repeats(first, o) || o == failed {
 		if base := e.unmutated(); base != passed {
-			log.Errorf("the mutant at %s %s again alone, and every test %s on the unmutated code there, so it is UNCLASSIFIED\n", mut.Position(), o, base)
+			log.Errorf("the mutant at %s %s, and every test %s on the unmutated code there, so it is UNCLASSIFIED\n", mut.Position(), aloneEnd(first, o), base)
 			status = mutator.Unclassified
 		}
 	}
 	mut.SetStatus(status)
 
 	return o
+}
+
+// aloneEnd says how a run alone ended alone after a first run that ended first: "timed out again
+// alone" or "crashed again alone" for a repeat, else such as "failed a test alone".
+func aloneEnd(first, alone outcome) string {
+	if repeats(first, alone) {
+		return alone.String() + " again alone"
+	}
+
+	return alone.String() + " alone"
 }
 
 // unmutated is how every test of the mutant's package ends on the unmutated code in the copy of

@@ -390,10 +390,12 @@ any test runs, when one of them differs:
   `GOARCH` and `GOFLAGS`;
 - the SHA-256 of every file in the directory of each pending mutant's package and in the
   directories below it (sources, tests, `testdata`, embedded files), save a directory whose name
-  starts with `.` or `_`, a nested module, and the files the two runs write themselves: the
-  settle file, a temporary file the settle file's write leaves beside it (the settle file's name,
-  a dot and decimal digits, such as `pending.json.123456`), and each run's `--output` report; a
-  file changed, gone or new is refused;
+  starts with `.` or `_` and a nested module; a file changed, gone or new is refused. The first
+  run records every file it finds there. The run with `--settle` leaves out only the files the two
+  runs write themselves that the first run did not record, new since it: the settle file, a
+  temporary file the settle file's write leaves beside it (the settle file's name, a dot and
+  decimal digits, such as `pending.json.123456`), and each run's `--output` report. A file that was
+  at one of those paths when the first run deferred its mutants is compared like any other;
 - the SHA-256 of the module's `go.mod` and `go.sum`.
 
 The check covers no other package the tests link outside those directories, no environment
@@ -401,11 +403,14 @@ variable but `GOFLAGS` (`GOEXPERIMENT`, `CGO_ENABLED`, the tests' own), and noth
 module, such as the module cache. A hand-written mutant (`--extra-mutants`) must name its file
 in the case the disk does, or the first run refuses it.
 
-A run refuses, when it starts, a `--settle-later` or `--output` path that names an existing file
-in the directory of the package it runs or below, unless Gremlins wrote that file: a settle file
-(a JSON object with the members `settings` and `mutants`) or a report (a JSON object with the
-member `go_module`). The run would write over any other file there, and the check above leaves
-those paths out.
+A run with `--settle-later` refuses, when it starts and before it changes any file, an `--output`
+path that names an existing file in the directory of the package it runs or below, whatever the
+file holds, since the run would write its report over it, and a `--settle-later` path that names
+one there unless the file reads as a settle file, since the run would remove it: a JSON object
+with the members `timeout`, `settings`, `files` and `mutants`, no member a settle file does not
+have, and nothing after it. This keeps a file of yours from being overwritten or removed; it does
+not tell who wrote the file, and the check above does not rely on it. A run without
+`--settle-later` checks neither path.
 
 A run with `--settle-later` removes the file at that path when it starts, and writes the new one
 to a temporary file it renames, so the path holds a whole file of this run or none: without
@@ -515,7 +520,9 @@ Gremlins checks the subset's verdict with every test of the package:
   test passes on such a kill, Gremlins logs `SELECTION DISAGREES WITH THE WHOLE SUITE`, runs every
   test for the package's remaining mutants, and runs every test again for each of its kills that no
   whole suite confirmed. A whole suite that times out or crashes on a kill disables nothing; if it
-  does so when the kill runs alone too, the kill is `UNCLASSIFIED`;
+  does so when the kill runs alone too, the kill is `UNCLASSIFIED`. A kill confirmed once every
+  mutant has run counts only if every test then passes on the unmutated code in the same place,
+  as any kill alone does; otherwise it is `UNCLASSIFIED`;
 - a subset that timed out or crashed runs again alone with every test, as any such mutant does.
 
 The verdicts do not depend on which mutant ends first. What these checks do not catch is a

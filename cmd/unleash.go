@@ -17,10 +17,12 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -264,48 +266,54 @@ func readToolchain(ctx context.Context, mod gomodule.GoModule) (engine.Toolchain
 	return tc, nil
 }
 
-// ownShapes are the files gremlins writes, by the members of the JSON object each holds: a settle
-// file (--settle-later) holds "settings" and "mutants", a report (--output) "go_module".
-var ownShapes = [][]string{{"settings", "mutants"}, {"go_module"}}
+// settleFileMembers are the members of every settle file WriteDeferred writes.
+var settleFileMembers = []string{"timeout", "settings", "files", "mutants"}
 
-// refuseForeign refuses a run whose --settle-later or --output path names an existing file in the
-// directory of the package it runs or below, unless gremlins wrote it (ownShapes): the run would
-// write over the file, and the check of a later --settle leaves those paths out, so a source or a
-// fixture there would escape it.
+// refuseForeign refuses a run with --settle-later whose paths name an existing file in the
+// directory of the package it runs or below, before the run changes any file there: the run would
+// write its report over an --output file, whatever the file holds, and remove a --settle-later
+// file that is not a settle file (settleFile). A run without --settle-later checks neither. Which
+// file a later --settle leaves out of its check does not rest on this: that is decided by what the
+// deferring run recorded.
 func refuseForeign(mod gomodule.GoModule) error {
+	later := configuration.Get[string](configuration.UnleashSettleLaterKey)
+	if later == "" {
+		return nil
+	}
 	pkg := filepath.Join(mod.Root, mod.CallingDir)
-	for _, f := range []struct{ flag, key string }{{paramSettleLater, configuration.UnleashSettleLaterKey}, {paramOutput, configuration.UnleashOutputKey}} {
-		p := configuration.Get[string](f.key)
-		rel, err := filepath.Rel(pkg, p)
-		if p == "" || err != nil || !filepath.IsLocal(rel) {
-			continue
+	if inPackage(pkg, later) {
+		if data, err := os.ReadFile(later); !errors.Is(err, fs.ErrNotExist) && (err != nil || !settleFile(data)) { //nolint:gosec // the path the user names
+			return fmt.Errorf("--%s %s names a file of the package that is not a settle file", paramSettleLater, later)
 		}
-		data, err := os.ReadFile(p) //nolint:gosec // the path the user names
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		if err != nil || !ownFile(data) {
-			return fmt.Errorf("--%s %s names a file of the package that is neither a settle file nor a report gremlins wrote", f.flag, p)
+	}
+	if output := configuration.Get[string](configuration.UnleashOutputKey); inPackage(pkg, output) {
+		if _, err := os.Lstat(output); !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("--%s %s names an existing file of the package, which a run with --%s does not write over", paramOutput, output, paramSettleLater)
 		}
 	}
 
 	return nil
 }
 
-// ownFile reports whether data is a JSON object of one of the ownShapes.
-func ownFile(data []byte) bool {
-	var doc map[string]json.RawMessage
-	if json.Unmarshal(data, &doc) != nil {
+// inPackage reports whether the absolute path p names the package directory pkg or a path below it.
+func inPackage(pkg, p string) bool {
+	rel, err := filepath.Rel(pkg, p)
+
+	return err == nil && filepath.IsLocal(rel)
+}
+
+// settleFile reports whether data reads as a settle file: one JSON object that decodes as an
+// engine.Deferred with no member a Deferred does not have, and holds settleFileMembers. It keeps
+// a file of the user's from removal; it does not prove that gremlins wrote data.
+func settleFile(data []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var members map[string]json.RawMessage
+	if dec.Decode(new(engine.Deferred)) != nil || !errors.Is(dec.Decode(new(json.RawMessage)), io.EOF) || json.Unmarshal(data, &members) != nil {
 		return false
 	}
 
-	for _, members := range ownShapes {
-		if !slices.ContainsFunc(members, func(m string) bool { return doc[m] == nil }) {
-			return true
-		}
-	}
-
-	return false
+	return !slices.ContainsFunc(settleFileMembers, func(m string) bool { return members[m] == nil })
 }
 
 // extraMutants are the mutants the file --extra-mutants names lists, none without the setting.

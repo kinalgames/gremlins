@@ -79,7 +79,7 @@ var moduleFiles = []string{"go.mod", "go.sum"}
 type scan struct {
 	fsys     fs.FS
 	keep     map[string]bool   // the files whose content the scan keeps
-	own      func(string) bool // the files gremlins' runs write themselves, which it leaves out
+	skip     func(string) bool // the files it leaves out
 	digests  map[string]string
 	contents map[string][]byte
 }
@@ -88,10 +88,10 @@ type scan struct {
 // from the module root) can rest on besides the toolchain: every file of those directories and of
 // the directories below them (sources, tests, testdata, embedded files), save the directories the
 // go command never reads a package's files from (a name that starts with "." or "_", a nested
-// module), and the module's go.mod and go.sum; save, too, the files own names. It keeps the
+// module), and the module's go.mod and go.sum; save, too, the files skip names. It keeps the
 // content of the files keep names.
-func (m MutantExecutorDealer) tree(dirs []string, keep map[string]bool, own func(string) bool) (*scan, error) {
-	s := &scan{fsys: os.DirFS(m.mod.Root), keep: keep, own: own, digests: map[string]string{}, contents: map[string][]byte{}}
+func (m MutantExecutorDealer) tree(dirs []string, keep map[string]bool, skip func(string) bool) (*scan, error) {
+	s := &scan{fsys: os.DirFS(m.mod.Root), keep: keep, skip: skip, digests: map[string]string{}, contents: map[string][]byte{}}
 	for _, dir := range dirs {
 		if !fs.ValidPath(dir) {
 			return nil, fmt.Errorf("%s is outside the module", dir)
@@ -132,9 +132,9 @@ func (s *scan) walk(dir string) error {
 }
 
 // add hashes the file name as it reads it, and keeps its content when the scan keeps it; a file
-// gremlins' runs write is left out.
+// skip names is left out.
 func (s *scan) add(name string) error {
-	if s.own(name) {
+	if s.skip(name) {
 		return nil
 	}
 	f, err := s.fsys.Open(name)

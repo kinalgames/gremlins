@@ -60,63 +60,104 @@ func pendingIn(t *testing.T, root string) (engine.Deferred, error) {
 	return dealer.Defer([]mutator.Mutator{mut})
 }
 
-// writtenFiles are the files a module root holds beside treeFiles, in the order Defer records
-// them: p/other.json, p/pending.json, a temporary file os.CreateTemp names beside it, and its
-// neighbours that are no such file (p/pending.json.bak, p/pending.json.d/x.go), and p/report.json.
-var writtenFiles = []string{"p/other.json", "p/pending.json", "p/pending.json.42", "p/pending.json.bak", "p/pending.json.d/x.go", "p/report.json"}
-
-// trackedFiles are the files of the module whose record writtenCases check: p/a.go and
-// writtenFiles.
-var trackedFiles = append([]string{fileP}, writtenFiles...)
-
-// writtenCases are where --settle-later and -o point, relative to that module root, and which of
-// trackedFiles Defer records.
-var writtenCases = []struct {
-	name, later, output string
-	relative            bool
-	recorded            []string
-}{
-	{"both in the package", writtenFiles[1], writtenFiles[5], false, []string{fileP, writtenFiles[0], writtenFiles[3], writtenFiles[4]}},
-	{"a settle file named as a source without its extension", "p/a", "", false, trackedFiles},
-	{"neither set", "", "", false, trackedFiles},
-	{"relative paths", writtenFiles[1], writtenFiles[5], true, trackedFiles},
-	{"outside the module", "../pending.json", "../p/report.json", false, trackedFiles},
+// writeFiles writes each of files, by its path from root, with its content.
+func writeFiles(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for name, content := range files {
+		file := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(file), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
-func TestDeferLeavesOutTheFilesTheRunsWrite(t *testing.T) {
-	for _, tc := range writtenCases {
+// Where the runs of the provenance tests write, from the module root: the deferring run's settle
+// file and report, and the settling run's report.
+const (
+	pendingFile = "p/pending.json"
+	reportFile  = "p/report.json"
+	settledFile = "p/settled.json"
+	// fixtureContent is a file's content when a run defers its mutants.
+	fixtureContent = "fixture"
+)
+
+func TestDeferRecordsTheFilesAtThePathsTheRunsWrite(t *testing.T) {
+	root := treeRoot(t)
+	ownFiles := []string{pendingFile, pendingFile + ".42", reportFile}
+	for _, name := range ownFiles {
+		writeFiles(t, root, map[string]string{name: name})
+	}
+	report := filepath.Join(root, filepath.FromSlash(reportFile))
+	viperSet(map[string]any{configuration.UnleashSettleLaterKey: filepath.Join(root, filepath.FromSlash(pendingFile)), configuration.UnleashOutputKey: report})
+	got, err := pendingIn(t, root)
+	viperReset()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recorded []string
+	for _, f := range got.Files {
+		if slices.Contains(ownFiles, f.Path) {
+			recorded = append(recorded, f.Path)
+		}
+	}
+	if !slices.Equal(recorded, ownFiles) || got.Output != report {
+		t.Errorf("recorded %v and the report %q, want %v and %q", recorded, got.Output, ownFiles, report)
+	}
+}
+
+// provenanceCases are files of a module root of treeFiles: those it holds when a run defers a
+// mutant of p with --settle-later at pendingFile and -o at reportFile, and those it holds when a
+// run settles it with --settle at settle (from the root; ".." leaves the module) and -o at output
+// ("" for none); and the start of the settling run's error, "" for none.
+var provenanceCases = []struct {
+	name           string
+	before, after  map[string]string
+	settle, output string
+	want           string
+}{
+	{"the files the runs wrote since the run deferred", nil,
+		map[string]string{pendingFile: "{}", pendingFile + ".42": "", reportFile: "{}", settledFile: "{}"},
+		pendingFile, settledFile, ""},
+	{"a file beside the settle file", nil, map[string]string{pendingFile + ".bak": "x"}, pendingFile, "", pendingFile + ".bak is new since"},
+	{"a directory named after the settle file", nil, map[string]string{pendingFile + ".d/x.go": "package d"}, pendingFile, "", pendingFile + ".d/x.go is new since"},
+	{"a settle file outside the module", nil, map[string]string{pendingFile: "{}"}, "../" + pendingFile, "", pendingFile + " is new since"},
+	{"the settle file, recorded", map[string]string{pendingFile: fixtureContent}, map[string]string{pendingFile: "{}"}, pendingFile, "", pendingFile + " changed since"},
+	{"a temporary file's name, recorded", map[string]string{pendingFile + ".42": fixtureContent}, map[string]string{pendingFile + ".42": ""}, pendingFile, "", pendingFile + ".42 changed since"},
+	{"the deferring run's report, recorded", map[string]string{reportFile: fixtureContent}, map[string]string{reportFile: "{}"}, pendingFile, "", reportFile + " changed since"},
+	{"the settling run's report, recorded", map[string]string{settledFile: fixtureContent}, map[string]string{settledFile: "{}"}, pendingFile, settledFile, settledFile + " changed since"},
+	{"the settling run's report, recorded and unchanged", map[string]string{settledFile: fixtureContent}, nil, pendingFile, settledFile, ""},
+}
+
+func TestResumeLeavesOutOnlyTheFilesTheRunsWroteSinceTheRunDeferred(t *testing.T) {
+	for _, tc := range provenanceCases {
 		t.Run(tc.name, func(t *testing.T) {
 			root := treeRoot(t)
-			for _, name := range writtenFiles {
-				file := filepath.Join(root, filepath.FromSlash(name))
-				if err := os.MkdirAll(filepath.Dir(file), 0o750); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(file, []byte(name), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			at := func(p string) string {
-				if p == "" || tc.relative {
-					return p
-				}
-
-				return filepath.Join(root, filepath.FromSlash(p))
-			}
-			viperSet(map[string]any{configuration.UnleashSettleLaterKey: at(tc.later), configuration.UnleashOutputKey: at(tc.output)})
-			got, err := pendingIn(t, root)
+			at := func(p string) string { return filepath.Join(root, filepath.FromSlash(p)) }
+			writeFiles(t, root, tc.before)
+			viperSet(map[string]any{configuration.UnleashSettleLaterKey: at(pendingFile), configuration.UnleashOutputKey: at(reportFile)})
+			d, err := pendingIn(t, root)
 			viperReset()
 			if err != nil {
 				t.Fatal(err)
 			}
-			var recorded []string
-			for _, f := range got.Files {
-				if slices.Contains(trackedFiles, f.Path) {
-					recorded = append(recorded, f.Path)
-				}
+			d.Mutants = []engine.DeferredMutant{{File: fileP, Line: 4, Column: 11, Type: arithmeticBase, Pkg: pkgP, First: crashedRun}}
+			writeFiles(t, root, tc.after)
+			settings := map[string]any{configuration.UnleashSettleKey: at(tc.settle)}
+			if tc.output != "" {
+				settings[configuration.UnleashOutputKey] = at(tc.output)
 			}
-			if !slices.Equal(recorded, tc.recorded) || got.Output != at(tc.output) {
-				t.Errorf("recorded %v and the report %q, want %v and %q", recorded, got.Output, tc.recorded, at(tc.output))
+			viperSet(settings)
+			defer viperReset()
+			seq := &sequence{runs: []execContext{fakeExecCommandSuccess}}
+			_, err = settlingIn(t, root, seq).Resume(context.Background(), d)
+			if tc.want == "" && (err != nil || len(seq.all()) != 1) {
+				t.Errorf("%v after %v, want the mutant run alone", err, seq.all())
+			}
+			if tc.want != "" && (err == nil || !strings.HasPrefix(err.Error(), tc.want) || len(seq.all()) != 0) {
+				t.Errorf("%v after %v, want %q before any run", err, seq.all(), tc.want)
 			}
 		})
 	}

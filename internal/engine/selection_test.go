@@ -277,10 +277,12 @@ func TestADisagreementMakesThePackageRunEveryTest(t *testing.T) {
 }
 
 func TestTheIndexIsNotChargedToTheMutantsTime(t *testing.T) {
-	const elapsed = 500 * time.Millisecond
+	// A mutant's time is ample for a loaded machine, and the index takes a share of it that the
+	// time left at each command's start would show.
+	const elapsed, index = 10 * time.Second, 2 * time.Second
 	budget := elapsed * engine.DefaultTimeoutCoefficient
 	got := passing()
-	sel := engine.WithSelector(selection.New(&indexStub{delay: budget + 500*time.Millisecond}, 0, (&heard{}).report))
+	sel := engine.WithSelector(selection.New(&indexStub{delay: index}, 0, (&heard{}).report))
 	mutants := []*mutantStub{mutantAt(mutator.Runnable, 3), mutantAt(mutator.Runnable, 4)}
 	var wg sync.WaitGroup
 	for _, mut := range mutants {
@@ -297,7 +299,7 @@ func TestTheIndexIsNotChargedToTheMutantsTime(t *testing.T) {
 		}
 	}
 	for i, left := range got.timeouts {
-		if left < budget/2 || left > budget {
+		if left <= budget-index/2 || left > budget {
 			t.Errorf("%v had %v of its %v", got.runs[i], left, budget)
 		}
 	}

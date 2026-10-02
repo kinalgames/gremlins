@@ -474,20 +474,42 @@ func TestASettlingRunChecksAFileNamedAfterTheSettleFile(t *testing.T) {
 	}
 }
 
-// foreignCases are files at the path a run's --settle-later or --output names, relative to the
-// escape fixture's copy ("" for none), and the start of the run's refusal, "" for none.
+// settleJSON is a settle file as WriteDeferred writes one.
+const settleJSON = `{"timeout":1,"settings":{"package":".","toolchain":{"go_version":"go1.27","goos":"linux","goarch":"amd64"}},"files":[],"mutants":[]}`
+
+// The paths and refusals of foreignCases: a directory, a settle file's name, and the start of each
+// setting's refusal.
+const (
+	testdataDir   = "testdata"
+	pendingJSON   = "pending.json"
+	refusedOutput = "--output "
+	refusedLater  = "--settle-later "
+	laterKey      = configuration.UnleashSettleLaterKey
+	outputKey     = configuration.UnleashOutputKey
+)
+
+// foreignCases are files at the path a run with --settle-later names, relative to the escape
+// fixture's copy: --settle-later itself, or --output beside a --settle-later path outside the
+// package; the file's content ("" for none, but for the source check.go and the directory
+// testdata), and the start of the run's refusal, "" for none.
 var foreignCases = []struct {
 	name, flag, path, content, want string
 }{
-	{"a source", configuration.UnleashOutputKey, "check.go", "", "--output "},
-	{"a fixture", configuration.UnleashSettleLaterKey, "testdata/golden.json", `{"a": 1}`, "--settle-later "},
-	{"a directory", configuration.UnleashOutputKey, "testdata", "", "--output "},
-	{"a settle file", configuration.UnleashSettleLaterKey, "pending.json", `{"timeout": 1, "settings": {}, "mutants": []}`, ""},
-	{"a report", configuration.UnleashOutputKey, "report.json", `{"go_module": "example.com/escape"}`, ""},
-	{"no file", configuration.UnleashOutputKey, "none.json", "", ""},
+	{"a source as the report", outputKey, "check.go", "", refusedOutput},
+	{"a fixture in a report's shape as the report", outputKey, "testdata/report.json", `{"go_module":"example.com/stored","files":[]}`, refusedOutput},
+	{"a directory as the report", outputKey, testdataDir, "", refusedOutput},
+	{"no file as the report", outputKey, "none.json", "", ""},
+	{"a fixture as the settle file", laterKey, "testdata/golden.json", `{"a": 1}`, refusedLater},
+	{"a fixture in a settle file's shape", laterKey, "testdata/state.json", `{"settings":{"level":1},"mutants":["a"]}`, refusedLater},
+	{"settings without mutants", laterKey, pendingJSON, `{"settings":{}}`, refusedLater},
+	{"a settle file with a member it does not have", laterKey, pendingJSON, settleJSON[:len(settleJSON)-1] + `,"level":1}`, refusedLater},
+	{"a settle file followed by more", laterKey, pendingJSON, settleJSON + "{}", refusedLater},
+	{"a directory as the settle file", laterKey, testdataDir, "", refusedLater},
+	{"a settle file", laterKey, pendingJSON, settleJSON, ""},
+	{"no file as the settle file", laterKey, "none.json", "", ""},
 }
 
-func TestARunRefusesToNameAFileOfThePackageGremlinsDidNotWrite(t *testing.T) {
+func TestARunWithSettleLaterRefusesToNameAFileOfThePackage(t *testing.T) {
 	for _, tc := range foreignCases {
 		t.Run(tc.name, func(t *testing.T) {
 			copied := filepath.Join(t.TempDir(), "escape")
@@ -503,13 +525,14 @@ func TestARunRefusesToNameAFileOfThePackageGremlinsDidNotWrite(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if tc.path == "testdata" {
+			if tc.path == testdataDir {
 				if err := os.Mkdir(path, 0o750); err != nil {
 					t.Fatal(err)
 				}
 			}
 			before, _ := os.ReadFile(path) //nolint:gosec // the test's own copy
 			defer configuration.Reset()
+			configuration.Set(laterKey, filepath.Join(t.TempDir(), pendingJSON))
 			configuration.Set(tc.flag, path)
 			mod, err := gomodule.Init(copied)
 			if err != nil {
@@ -526,21 +549,49 @@ func TestARunRefusesToNameAFileOfThePackageGremlinsDidNotWrite(t *testing.T) {
 	}
 }
 
-func TestARunNamingASourceAsItsReportLeavesItAsItIs(t *testing.T) {
-	copied := filepath.Join(t.TempDir(), "escape")
-	if err := os.CopyFS(copied, os.DirFS(filepath.Join("testdata", "escape"))); err != nil {
-		t.Fatal(err)
-	}
-	source := filepath.Join(copied, "check.go")
-	before, err := os.ReadFile(source) //nolint:gosec // the test's own copy
+func TestARunWithoutSettleLaterChecksNoPath(t *testing.T) {
+	defer configuration.Reset()
+	copied := filepath.Join("testdata", "escape")
+	configuration.Set(configuration.UnleashOutputKey, filepath.Join(copied, "check.go"))
+	mod, err := gomodule.Init(copied)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, logged, err := unleashIn(t, copied, "", map[string]any{configuration.UnleashOutputKey: source}); err == nil || !strings.Contains(err.Error(), "neither a settle file nor a report") {
-		t.Fatalf("%v; logged %s", err, logged)
+	if err := refuseForeign(mod); err != nil {
+		t.Errorf("%v, want no check: the run writes no settle file", err)
 	}
-	if after, err := os.ReadFile(source); err != nil || !bytes.Equal(after, before) { //nolint:gosec // the test's own copy
-		t.Errorf("check.go is %q: %v", after, err)
+}
+
+func TestARunWithSettleLaterNamingAFileOfThePackageAsItsReportLeavesItAsItIs(t *testing.T) {
+	for name, content := range map[string]string{"check.go": "", "testdata/report.json": `{"go_module":"example.com/stored","files":[]}`} {
+		copied := filepath.Join(t.TempDir(), "escape")
+		if err := os.CopyFS(copied, os.DirFS(filepath.Join("testdata", "escape"))); err != nil {
+			t.Fatal(err)
+		}
+		file := filepath.Join(copied, filepath.FromSlash(name))
+		if content != "" {
+			if err := os.MkdirAll(filepath.Dir(file), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		before, err := os.ReadFile(file) //nolint:gosec // the test's own copy
+		if err != nil {
+			t.Fatal(err)
+		}
+		pending := filepath.Join(t.TempDir(), "pending.json")
+		settings := map[string]any{configuration.UnleashOutputKey: file, configuration.UnleashSettleLaterKey: pending}
+		if _, logged, err := unleashIn(t, copied, "", settings); err == nil || !strings.Contains(err.Error(), "names an existing file of the package") {
+			t.Fatalf("%s: %v; logged %s", name, err, logged)
+		}
+		if after, err := os.ReadFile(file); err != nil || !bytes.Equal(after, before) { //nolint:gosec // the test's own copy
+			t.Errorf("%s is %q: %v", name, after, err)
+		}
+		if _, err := os.Stat(pending); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s: the refused run wrote its settle file: %v", name, err)
+		}
 	}
 }
 

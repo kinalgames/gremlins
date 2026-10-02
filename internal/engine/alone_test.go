@@ -82,8 +82,9 @@ func hanging(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 }
 
 // aloneElapsed is how long the package's tests last for aloneDealer: a mutant's time is three times
-// that, which a hanging run passes and every other fake run stays well within.
-const aloneElapsed = time.Second
+// that, which a hanging run passes and every other fake run stays within on a loaded machine, where
+// starting a test binary can take seconds.
+const aloneElapsed = 3 * time.Second
 
 // sequence runs its commands in turn, the last for every command after it, and records them.
 type sequence struct {
@@ -194,30 +195,46 @@ func TestAWorkerWithoutAWorkDirectoryStops(t *testing.T) {
 }
 
 // aloneRuns are the commands of a mutant's first run, which needs a run alone, of its run alone and,
-// when that repeats the first, of every test on the unmutated code; the verdict and how many
-// commands ran.
+// when that kills the mutant, of every test on the unmutated code; the verdict, how many commands
+// ran, and how the error the run logs says the mutant ended alone, "" for no such error.
 var aloneRuns = []struct {
-	name  string
-	runs  []execContext
-	want  mutator.Status
-	count int
+	name   string
+	runs   []execContext
+	want   mutator.Status
+	count  int
+	logged string
 }{
-	{"a time-out that repeats", []execContext{hanging, hanging, fakeExecCommandSuccess}, mutator.TimedOut, 3},
-	{"a time-out that repeats where the unmutated code times out too", []execContext{hanging, hanging, hanging}, mutator.Unclassified, 3},
-	{"a time-out, then a pass", []execContext{hanging, fakeExecCommandSuccess}, mutator.Lived, 2},
-	{"a time-out, then a failed test", []execContext{hanging, fakeExecCommandTestsFailure}, mutator.Killed, 2},
-	{"a time-out, then a crash", []execContext{hanging, crashedBinary}, mutator.Unclassified, 2},
-	{"a crash that repeats", []execContext{crashedBinary, crashedBinary, fakeExecCommandSuccess}, mutator.Killed, 3},
-	{"a crash that repeats where the unmutated code crashes too", []execContext{crashedBinary, crashedBinary, crashedBinary}, mutator.Unclassified, 3},
-	{"a crash that repeats where a test fails on the unmutated code", []execContext{crashedBinary, crashedBinary, fakeExecCommandTestsFailure}, mutator.Unclassified, 3},
-	{"a crash, then a pass", []execContext{crashedBinary, fakeExecCommandSuccess}, mutator.Lived, 2},
-	{"a crash, then a build failure", []execContext{crashedBinary, fakeExecCommandBuildFailure}, mutator.Unclassified, 2},
-	{"a crash, then a run that does not start", []execContext{crashedBinary, notStarted}, mutator.Unclassified, 2},
+	{"a time-out that repeats", []execContext{hanging, hanging, fakeExecCommandSuccess}, mutator.TimedOut, 3, ""},
+	{"a time-out that repeats where the unmutated code times out too", []execContext{hanging, hanging, hanging}, mutator.Unclassified, 3,
+		"timed out again alone, and every test timed out on the unmutated code"},
+	{"a time-out, then a pass", []execContext{hanging, fakeExecCommandSuccess}, mutator.Lived, 2, ""},
+	{"a time-out, then a failed test", []execContext{hanging, fakeExecCommandTestsFailure, fakeExecCommandSuccess}, mutator.Killed, 3, ""},
+	{"a time-out, then a failed test where a test fails on the unmutated code", []execContext{hanging, fakeExecCommandTestsFailure, fakeExecCommandTestsFailure}, mutator.Unclassified, 3,
+		"failed a test alone, and every test failed a test on the unmutated code"},
+	{"a time-out, then a crash", []execContext{hanging, crashedBinary}, mutator.Unclassified, 2, ""},
+	{"a crash that repeats", []execContext{crashedBinary, crashedBinary, fakeExecCommandSuccess}, mutator.Killed, 3, ""},
+	{"a crash that repeats where the unmutated code crashes too", []execContext{crashedBinary, crashedBinary, crashedBinary}, mutator.Unclassified, 3,
+		"crashed again alone, and every test crashed on the unmutated code"},
+	{"a crash that repeats where a test fails on the unmutated code", []execContext{crashedBinary, crashedBinary, fakeExecCommandTestsFailure}, mutator.Unclassified, 3,
+		"crashed again alone, and every test failed a test on the unmutated code"},
+	{"a crash, then a failed test", []execContext{crashedBinary, fakeExecCommandTestsFailure, fakeExecCommandSuccess}, mutator.Killed, 3, ""},
+	{"a crash, then a failed test where the unmutated code crashes", []execContext{crashedBinary, fakeExecCommandTestsFailure, crashedBinary}, mutator.Unclassified, 3,
+		"failed a test alone, and every test crashed on the unmutated code"},
+	{"a crash, then a pass", []execContext{crashedBinary, fakeExecCommandSuccess}, mutator.Lived, 2, ""},
+	{"a crash, then a build failure", []execContext{crashedBinary, fakeExecCommandBuildFailure}, mutator.Unclassified, 2, ""},
+	{"a crash, then a run that does not start", []execContext{crashedBinary, notStarted}, mutator.Unclassified, 2, ""},
 }
+
+// unmutatedLog is in the error a run logs when a kill alone does not count.
+const unmutatedLog = "on the unmutated code there, so it is UNCLASSIFIED"
 
 func TestATimeOutOrACrashRunsAgainAloneWithEveryTest(t *testing.T) {
 	for _, tc := range aloneRuns {
 		t.Run(tc.name, func(t *testing.T) {
+			errs := &bytes.Buffer{}
+			log.Reset()
+			log.Init(&bytes.Buffer{}, errs)
+			defer log.Reset()
 			seq := &sequence{runs: tc.runs}
 			dealer, dirs := aloneDealer(t, seq, "", engine.WithSelector(selection.New(&indexStub{}, 0, (&heard{}).report)))
 			mut := mutantAt(mutator.Runnable, 3)
@@ -230,13 +247,17 @@ func TestATimeOutOrACrashRunsAgainAloneWithEveryTest(t *testing.T) {
 			if mut.Status() != tc.want || len(runs) != tc.count || slices.ContainsFunc(runs[1:], func(args []string) bool { return runArg(args) != "" }) || (*dirs)[len(*dirs)-1] != "alone" {
 				t.Errorf("%v after %v in %v, want %v after %d runs, every test in alone", mut.Status(), runs, *dirs, tc.want, tc.count)
 			}
+			if logged := errs.String(); strings.Contains(logged, unmutatedLog) != (tc.logged != "") || tc.logged != "" && !strings.Contains(logged, "the mutant at a.go:3:2 "+tc.logged) {
+				t.Errorf("logged %q, want %q", logged, tc.logged)
+			}
 		})
 	}
 }
 
 // killCases are two subset kills outside the sample, at lines 3 (^(TestOne)$, the package's
 // lowest kill) and 8 (^(TestTwo)$), started in order, the commands their runs and Settle's take in
-// turn, whether ^(TestTwo)$ fails on the unmutated code, and the verdicts at lines 3 and 8.
+// turn, a kill alone followed by every test on the unmutated code, whether ^(TestTwo)$ fails on
+// the unmutated code, and the verdicts at lines 3 and 8.
 var killCases = []struct {
 	name    string
 	order   []int
@@ -247,23 +268,29 @@ var killCases = []struct {
 	count   int
 }{
 	{"the lowest kill agrees with every test", []int{8, 3},
-		[]execContext{fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, fakeExecCommandTestsFailure},
-		false, mutator.Killed, mutator.Killed, 3},
+		[]execContext{fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, fakeExecCommandSuccess},
+		false, mutator.Killed, mutator.Killed, 4},
+	{"the lowest kill agrees with every test, which fail on the unmutated code too", []int{8, 3},
+		[]execContext{fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, fakeExecCommandTestsFailure},
+		false, mutator.Unclassified, mutator.Killed, 4},
 	{"the lowest kill disagrees, so every kill is confirmed", []int{8, 3},
 		[]execContext{fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, fakeExecCommandSuccess, fakeExecCommandSuccess},
 		false, mutator.Lived, mutator.Lived, 4},
 	{"the lowest kill, which ended last, disagrees while another agrees", []int{8, 3},
-		[]execContext{fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, fakeExecCommandSuccess, fakeExecCommandTestsFailure},
-		false, mutator.Lived, mutator.Killed, 4},
+		[]execContext{fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, fakeExecCommandSuccess, fakeExecCommandTestsFailure, fakeExecCommandSuccess},
+		false, mutator.Lived, mutator.Killed, 5},
+	{"the lowest kill disagrees while another agrees, whose tests fail on the unmutated code too", []int{8, 3},
+		[]execContext{fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, fakeExecCommandSuccess, fakeExecCommandTestsFailure, fakeExecCommandTestsFailure},
+		false, mutator.Lived, mutator.Unclassified, 5},
 	{"a kill by a subset that fails unmutated, beside the lowest kill", []int{3, 8},
-		[]execContext{fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, fakeExecCommandSuccess, fakeExecCommandTestsFailure},
-		true, mutator.Killed, mutator.Lived, 4},
+		[]execContext{fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, fakeExecCommandSuccess, fakeExecCommandTestsFailure, fakeExecCommandSuccess},
+		true, mutator.Killed, mutator.Lived, 5},
 	{"the lowest kill's confirmation crashes, which disables nothing", []int{8, 3},
 		[]execContext{fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, crashedBinary},
 		false, mutator.Unclassified, mutator.Killed, 3},
-	{"the same, in the other order", []int{8, 3},
-		[]execContext{fakeExecCommandTestsFailure, fakeExecCommandSuccess, fakeExecCommandTestsFailure, fakeExecCommandTestsFailure},
-		true, mutator.Killed, mutator.Lived, 4},
+	{"a kill by a subset that fails unmutated, beside the lowest kill, in the other order", []int{8, 3},
+		[]execContext{fakeExecCommandTestsFailure, fakeExecCommandSuccess, fakeExecCommandTestsFailure, fakeExecCommandTestsFailure, fakeExecCommandSuccess},
+		true, mutator.Killed, mutator.Lived, 5},
 }
 
 func TestSettleConfirmsEachPackagesLowestKill(t *testing.T) {
@@ -289,17 +316,20 @@ func TestSettleConfirmsEachPackagesLowestKill(t *testing.T) {
 }
 
 // recheckCases are the commands of a sampled subset kill's confirmation, which neither passes nor
-// fails, and of Settle's; the verdict, and whether the package runs every test afterwards.
+// fails, and of Settle's, a kill alone followed by every test on the unmutated code; the verdict,
+// whether the package runs every test afterwards, and how many commands ran.
 var recheckCases = []struct {
 	name     string
 	runs     []execContext
 	want     mutator.Status
 	disabled bool
+	count    int
 }{
-	{"every test fails alone", []execContext{fakeExecCommandTestsFailure, crashedBinary, fakeExecCommandTestsFailure}, mutator.Killed, false},
-	{"every test passes alone", []execContext{fakeExecCommandTestsFailure, crashedBinary, fakeExecCommandSuccess}, mutator.Lived, true},
-	{"every test crashes alone", []execContext{fakeExecCommandTestsFailure, crashedBinary, crashedBinary}, mutator.Unclassified, false},
-	{"every test times out alone", []execContext{fakeExecCommandTestsFailure, hanging, hanging}, mutator.Unclassified, false},
+	{"every test fails alone", []execContext{fakeExecCommandTestsFailure, crashedBinary, fakeExecCommandTestsFailure, fakeExecCommandSuccess}, mutator.Killed, false, 4},
+	{"every test fails alone, and on the unmutated code too", []execContext{fakeExecCommandTestsFailure, crashedBinary, fakeExecCommandTestsFailure, fakeExecCommandTestsFailure}, mutator.Unclassified, false, 4},
+	{"every test passes alone", []execContext{fakeExecCommandTestsFailure, crashedBinary, fakeExecCommandSuccess}, mutator.Lived, true, 3},
+	{"every test crashes alone", []execContext{fakeExecCommandTestsFailure, crashedBinary, crashedBinary}, mutator.Unclassified, false, 3},
+	{"every test times out alone", []execContext{fakeExecCommandTestsFailure, hanging, hanging}, mutator.Unclassified, false, 3},
 }
 
 func TestSettleConfirmsASampledKillWhoseConfirmationNeitherPassedNorFailed(t *testing.T) {
@@ -314,8 +344,8 @@ func TestSettleConfirmsASampledKillWhoseConfirmationNeitherPassedNorFailed(t *te
 				t.Fatalf("pending %t, disabled %t after %v", dealer.Pending(mut), sel.Disabled("example.com/p"), seq.all())
 			}
 			dealer.Settle(context.Background(), []mutator.Mutator{mut})
-			if mut.Status() != tc.want || sel.Disabled("example.com/p") != tc.disabled || len(seq.all()) != 3 {
-				t.Errorf("%v, disabled %t after %v; want %v, %t", mut.Status(), sel.Disabled("example.com/p"), seq.all(), tc.want, tc.disabled)
+			if mut.Status() != tc.want || sel.Disabled("example.com/p") != tc.disabled || len(seq.all()) != tc.count {
+				t.Errorf("%v, disabled %t after %v; want %v, %t after %d", mut.Status(), sel.Disabled("example.com/p"), seq.all(), tc.want, tc.disabled, tc.count)
 			}
 		})
 	}

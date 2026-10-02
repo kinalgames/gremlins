@@ -32,11 +32,11 @@ left operand starts. Any other build failure, of another package or before the b
 A package whose tests fail with no test failing (a signal that ended the test binary, a panic outside a test,
 `TestMain` exiting) is a crash. A time-out or a crash runs again alone once every other mutation has run, with every
 test of its package and the same timeout, since the load of the other runs may have caused it. A time-out that
-repeats is `TIMED OUT` and a crash that repeats is `KILLED`, but only if every test then passes on the unmutated
-code in the same place: otherwise the place, not the mutation, failed, and the mutation is `UNCLASSIFIED`. A test
-failure or a pass alone is the verdict, and anything else is `UNCLASSIFIED`. A run that could not be carried out
-(the go command did not start, refused its flags with exit status 2, or failed before it ran the package's tests)
-is `UNCLASSIFIED` at once.
+repeats is `TIMED OUT`, a crash that repeats is `KILLED`, and so is a test that fails alone, but each only if every
+test then passes on the unmutated code in the same place: otherwise the place, not the mutation, failed (a run alone
+rules out the load, not a service the tests need), and the mutation is `UNCLASSIFIED`. A pass alone is `LIVED`, and
+anything else is `UNCLASSIFIED`. A run that could not be carried out (the go command did not start, refused its
+flags with exit status 2, or failed before it ran the package's tests) is `UNCLASSIFIED` at once.
 
 The events are those the go command writes; a test can still write a line that `go test -json` reads as a test's
 failure (test2json's framing), so Gremlins' verdicts assume the tests do not imitate the test framework's output.

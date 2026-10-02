@@ -39,7 +39,7 @@ import (
 // nothing else runs on the machine, as when several gremlins runs share it: the time each
 // mutant's tests get, the settings that change a verdict, the files its verdicts can rest on with
 // their digests (tree), the packages whose test selection was disabled, each pending mutant, and
-// the absolute path of the run's report (-o), which the settling run leaves out of the tree.
+// the absolute path of the run's report (-o), which a settling run finds new since the run.
 type Deferred struct {
 	Timeout  time.Duration    `json:"timeout"`
 	Settings Settings         `json:"settings"`
@@ -90,8 +90,9 @@ type DeferredMutant struct {
 }
 
 // Defer is the state Settle would need to settle pending, all of them pending (Pending), or an
-// error when a file of their packages cannot be read for its digest. The tree leaves out the file
-// --settle-later names and the run's report (-o), which the run writes after it.
+// error when a file of their packages cannot be read for its digest. The tree records every file it
+// finds, at the paths this run writes too: its settle file is removed when it starts and written
+// after Defer, and its report (-o) after the run, so a file there is not this run's.
 func (m MutantExecutorDealer) Defer(pending []mutator.Mutator) (Deferred, error) {
 	confirm := m.unsettled.confirmations()
 	pending = slices.Clone(pending)
@@ -114,8 +115,7 @@ func (m MutantExecutorDealer) Defer(pending []mutator.Mutator) (Deferred, error)
 			d.Disabled = append(d.Disabled, k.pkg)
 		}
 	}
-	own := m.written(configuration.Get[string](configuration.UnleashSettleLaterKey), d.Output)
-	s, err := m.tree(m.mutantDirs(d.Mutants), nil, own)
+	s, err := m.tree(m.mutantDirs(d.Mutants), nil, func(string) bool { return false })
 	if err != nil {
 		return Deferred{}, err
 	}
@@ -233,8 +233,9 @@ func (m *MutantExecutorDealer) Resume(ctx context.Context, d Deferred) ([]mutato
 
 // sameRun checks that this run settles d's mutants as the run that deferred them would have: with
 // the same settings, among the same files of their packages and module (tree) with the same
-// content, each mutant's file among them. It answers that content by each file's path from the
-// module root.
+// content, each mutant's file among them. The tree leaves out only the files the two runs write
+// that d does not record, new since the deferring run: the settle file, its temporary files and
+// the reports (written). It answers the content of the mutants' files by path from the module root.
 func (m *MutantExecutorDealer) sameRun(d Deferred) (map[string][]byte, error) {
 	if here := m.settings(); d.Settings != here {
 		return nil, fmt.Errorf("the run that deferred the mutants had the settings %+v, this run has %+v", d.Settings, here)
@@ -243,8 +244,12 @@ func (m *MutantExecutorDealer) sameRun(d Deferred) (map[string][]byte, error) {
 	for _, dm := range d.Mutants {
 		keep[m.fromRoot(dm.File)] = true
 	}
-	own := m.written(configuration.Get[string](configuration.UnleashSettleKey), configuration.Get[string](configuration.UnleashOutputKey), d.Output)
-	s, err := m.tree(m.mutantDirs(d.Mutants), keep, own)
+	recorded := map[string]bool{}
+	for _, f := range d.Files {
+		recorded[f.Path] = true
+	}
+	written := m.written(configuration.Get[string](configuration.UnleashSettleKey), configuration.Get[string](configuration.UnleashOutputKey), d.Output)
+	s, err := m.tree(m.mutantDirs(d.Mutants), keep, func(name string) bool { return written(name) && !recorded[name] })
 	if err != nil {
 		return nil, err
 	}

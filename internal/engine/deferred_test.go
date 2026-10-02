@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-gremlins/gremlins/internal/configuration"
 	"github.com/go-gremlins/gremlins/internal/engine"
@@ -268,9 +269,7 @@ func TestResumeRefusesATreeThatChangedInAFileItRecorded(t *testing.T) {
 				t.Fatal(err)
 			}
 			seq := &sequence{runs: []execContext{fakeExecCommandSuccess}}
-			mod := gomodule.GoModule{Name: pkgP, Root: root, CallingDir: "."}
-			settling := engine.NewExecutorDealer(mod, workdir.NewCachedDealer(t.TempDir(), root), expectedTimeout, engine.WithExecContext(seq.exec))
-			_, err = settling.Resume(context.Background(), d)
+			_, err = settlingIn(t, root, seq).Resume(context.Background(), d)
 			if tc.want == "" && (err != nil || len(seq.all()) != 1) {
 				t.Errorf("%v after %v, want the mutant run alone", err, seq.all())
 			}
@@ -301,7 +300,7 @@ func sumRoot(t *testing.T) string {
 // deferredOf is a Deferred of the module of resumeDealer with the mutants dms.
 func deferredOf(dms ...engine.DeferredMutant) engine.Deferred {
 	return engine.Deferred{
-		Timeout: aloneElapsed * 3, Settings: engine.Settings{Package: "."},
+		Timeout: aloneElapsed * engine.DefaultTimeoutCoefficient, Settings: engine.Settings{Package: "."},
 		Files: []engine.DeferredFile{{Path: fileA, SHA256: sumDigest}}, Mutants: dms,
 	}
 }
@@ -310,14 +309,21 @@ func deferredOf(dms ...engine.DeferredMutant) engine.Deferred {
 // as its selector when given.
 func resumeDealer(t *testing.T, seq *sequence, sel *selection.Selector) *engine.MutantExecutorDealer {
 	t.Helper()
-	root := sumRoot(t)
-	mod := gomodule.GoModule{Name: pkgP, Root: root, CallingDir: "."}
-	opts := []engine.ExecutorDealerOption{engine.WithExecContext(seq.exec)}
+	var opts []engine.ExecutorDealerOption
 	if sel != nil {
 		opts = append(opts, engine.WithSelector(sel))
 	}
 
-	return engine.NewExecutorDealer(mod, workdir.NewCachedDealer(t.TempDir(), root), expectedTimeout, opts...)
+	return settlingIn(t, sumRoot(t), seq, opts...)
+}
+
+// settlingIn is a dealer running seq's commands on the module whose source is in root, with opts.
+func settlingIn(t *testing.T, root string, seq *sequence, opts ...engine.ExecutorDealerOption) *engine.MutantExecutorDealer {
+	t.Helper()
+	mod := gomodule.GoModule{Name: pkgP, Root: root, CallingDir: "."}
+
+	return engine.NewExecutorDealer(mod, workdir.NewCachedDealer(t.TempDir(), root), expectedTimeout,
+		append([]engine.ExecutorDealerOption{engine.WithExecContext(seq.exec)}, opts...)...)
 }
 
 func TestResumeSettlesTheDeferredMutantsInTheirSource(t *testing.T) {
@@ -343,7 +349,7 @@ func TestResumeSettlesTheDeferredMutantsInTheirSource(t *testing.T) {
 		t.Errorf("disabled %t, %t", sel.Disabled(pkgP), sel.Disabled("example.com/q"))
 	}
 	for _, args := range seq.all() {
-		if runArg(args) != "" || !strings.Contains(strings.Join(args, " "), "-timeout 5s") {
+		if runArg(args) != "" || !strings.Contains(strings.Join(args, " "), "-timeout "+(2*time.Second+aloneElapsed*engine.DefaultTimeoutCoefficient).String()) {
 			t.Errorf("%v: every test, within the deferred time", args)
 		}
 	}
@@ -362,11 +368,15 @@ func TestResumeConfirmsOnlyTheKillsTheDeferringRunNamed(t *testing.T) {
 }
 
 func TestResumeWithoutASelectorStillConfirmsAKill(t *testing.T) {
-	seq := &sequence{runs: []execContext{fakeExecCommandTestsFailure}}
+	// The kill's confirmation fails a test, and every test passes on the unmutated code.
+	seq := &sequence{runs: []execContext{fakeExecCommandTestsFailure, fakeExecCommandSuccess}}
 	d := deferredOf(engine.DeferredMutant{File: fileA, Line: 8, Column: 11, Type: arithmeticBase, Pkg: pkgP, Kill: true, Confirm: true})
 	muts, err := resumeDealer(t, seq, nil).Resume(context.Background(), d)
-	if err != nil || len(muts) != 1 || muts[0].Status() != mutator.Killed {
+	if err != nil || len(muts) != 1 {
 		t.Fatalf("%v: %v", muts, err)
+	}
+	if muts[0].Status() != mutator.Killed || len(seq.all()) != 2 {
+		t.Fatalf("%v after %v", muts[0].Status(), seq.all())
 	}
 }
 

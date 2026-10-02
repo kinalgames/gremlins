@@ -79,15 +79,15 @@ func (o outcome) again() bool {
 }
 
 // repeats reports whether a run alone that ended alone repeats a first run's time-out or crash,
-// which then counts once the unmutated code passes in the same place (aloneStatus).
+// which aloneStatus counts as a kill.
 func repeats(first, alone outcome) bool {
 	return alone == first && alone.again()
 }
 
 // aloneStatus is the verdict of a mutant whose run ended first and whose run alone, with every test
-// of its package, ended alone. A time-out or a crash counts as a kill only when it repeats; a
-// pass or a test failure is its own verdict. Anything else is unclassified, a build failure
-// included: the first run built the same code.
+// of its package, ended alone, before runAlone checks a kill against the unmutated code. A time-out
+// or a crash counts as a kill only when it repeats; a pass or a test failure is its own verdict.
+// Anything else is unclassified, a build failure included: the first run built the same code.
 func aloneStatus(first, alone outcome) mutator.Status {
 	switch {
 	case repeats(first, alone) && alone == timedOut:
